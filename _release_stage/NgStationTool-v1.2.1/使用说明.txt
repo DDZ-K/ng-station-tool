@@ -1,0 +1,4 @@
+v1.2.1
+1. 复制 config.example.json 为 config.json 并改公司路径
+2. 双击 NgStationTool.exe（Win10 x64，无需 .NET）
+3. 同夹多NG：每条先OK/NG键，全组无超时才回车；有超时不回车

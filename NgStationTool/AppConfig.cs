@@ -59,6 +59,10 @@ public sealed class AppConfig
     public bool EnqueueFromNgImageWatch { get; set; } = false;
     /// <summary>图片复制成功后是否把「改名后完整文件名（无扩展名）」作为 DMC 入缓存。</summary>
     public bool EnqueueFromImageCopyFolderName { get; set; } = true;
+    /// <summary>OK/NOK 判定后是否在「同文件夹组全部结束后」再按回车。</summary>
+    public bool EnterAfterFolderAllDone { get; set; } = true;
+    /// <summary>整夹全部判定结束后的确认键，默认 Enter。</summary>
+    public string ConfirmEnterKey { get; set; } = "Enter";
     public int LogReadyBudgetMs { get; set; } = 2000;
     public int KeyPressDelayMs { get; set; } = 50;
     public int ActivateWindowDelayMs { get; set; } = 150;

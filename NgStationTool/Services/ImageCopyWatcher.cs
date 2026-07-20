@@ -11,7 +11,7 @@ public sealed class ImageCopyWatcher : IDisposable
 {
     private readonly AppLogger _log;
     private readonly Func<AppConfig> _cfg;
-    private readonly Action<string, string>? _onCopiedRenamedDmc; // renamedStem, outputPath
+    private readonly Action<string, string, string>? _onCopiedRenamedDmc; // renamedStem, outputPath, folderKey
     private readonly ConcurrentDictionary<string, byte> _copiedOk = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>一级文件夹 → 最后活动时间 TickCount64</summary>
     private readonly ConcurrentDictionary<string, long> _folderTouch = new(StringComparer.OrdinalIgnoreCase);
@@ -27,7 +27,7 @@ public sealed class ImageCopyWatcher : IDisposable
     public bool IsRunning => Volatile.Read(ref _running) == 1;
     public string? LastError { get; private set; }
 
-    public ImageCopyWatcher(AppLogger log, Func<AppConfig> cfg, Action<string, string>? onCopiedRenamedDmc = null)
+    public ImageCopyWatcher(AppLogger log, Func<AppConfig> cfg, Action<string, string, string>? onCopiedRenamedDmc = null)
     {
         _log = log;
         _cfg = cfg;
@@ -363,7 +363,7 @@ public sealed class ImageCopyWatcher : IDisposable
                     $"整夹拷贝成功 ready={item.readyMs}ms | {path} → {targetPath}");
 
                 if (cfg.EnableCloudRelease && cfg.EnqueueFromImageCopyFolderName)
-                    _onCopiedRenamedDmc?.Invoke(renamedStem, targetPath);
+                    _onCopiedRenamedDmc?.Invoke(renamedStem, targetPath, folderName);
             }
             catch (Exception ex)
             {

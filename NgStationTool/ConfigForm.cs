@@ -34,6 +34,8 @@ public sealed class ConfigForm : Form
     private readonly TextBox _okKey;
     private readonly TextBox _nokKey;
     private readonly NumericUpDown _keyRepeat;
+    private readonly TextBox _confirmEnter;
+    private readonly CheckBox _enterAfterAll;
     private readonly TextBox _winTitle;
     private readonly TextBox _procName;
 
@@ -148,6 +150,11 @@ public sealed class ConfigForm : Form
         _nokKey = AddTb(p2, ref y, cfg.NokKey);
         AddLabel(p2, ref y, "按键重复次数");
         _keyRepeat = AddNum(p2, ref y, cfg.KeyRepeatCount, 1, 5);
+        AddLabel(p2, ref y, "整夹全部判定结束后确认键（默认 Enter）");
+        _confirmEnter = AddTb(p2, ref y, cfg.ConfirmEnterKey);
+        _enterAfterAll = AddCheck(p2, ref y,
+            "同文件夹多 NG：全部 OK/NOK 结束后才按回车（有超时则不回车；每条仍先按 OK/NG 键）",
+            cfg.EnterAfterFolderAllDone);
         AddLabel(p2, ref y, "目标窗口标题包含（可空=当前前台）");
         _winTitle = AddTb(p2, ref y, cfg.TargetWindowTitleContains);
         AddLabel(p2, ref y, "目标进程名（不含 .exe，可空）");
@@ -348,6 +355,8 @@ public sealed class ConfigForm : Form
         src.OkKey = _okKey.Text.Trim();
         src.NokKey = _nokKey.Text.Trim();
         src.KeyRepeatCount = (int)_keyRepeat.Value;
+        src.ConfirmEnterKey = string.IsNullOrWhiteSpace(_confirmEnter.Text) ? "Enter" : _confirmEnter.Text.Trim();
+        src.EnterAfterFolderAllDone = _enterAfterAll.Checked;
         src.TargetWindowTitleContains = _winTitle.Text.Trim();
         src.TargetProcessName = _procName.Text.Trim();
 

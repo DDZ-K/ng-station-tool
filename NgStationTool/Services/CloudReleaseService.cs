@@ -19,6 +19,8 @@ public sealed class CloudReleaseService : IDisposable
     private readonly ConcurrentQueue<string> _imgQ = new();
     private readonly ConcurrentQueue<string> _logQ = new();
     private readonly ConcurrentDictionary<string, byte> _processedLogs = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>曾出现超时的文件夹组：该组不再按回车。</summary>
+    private readonly ConcurrentDictionary<string, byte> _folderHadTimeout = new(StringComparer.OrdinalIgnoreCase);
     private readonly AutoResetEvent _signal = new(false);
     private CancellationTokenSource? _cts;
     private Task? _worker;
@@ -39,8 +41,8 @@ public sealed class CloudReleaseService : IDisposable
         _keyboard = keyboard;
     }
 
-    public void EnqueueDmc(string dmc, string source, string? path = null)
-        => _cache.TryEnqueue(dmc, source, path);
+    public void EnqueueDmc(string dmc, string source, string? path = null, string? folderKey = null)
+        => _cache.TryEnqueue(dmc, source, path, folderKey);
 
     public void Start()
     {
@@ -59,6 +61,8 @@ public sealed class CloudReleaseService : IDisposable
                 Directory.CreateDirectory(cfg.CloudLogArchiveRoot);
 
             _cts = new CancellationTokenSource();
+            _processedLogs.Clear();
+            _folderHadTimeout.Clear();
             _worker = Task.Factory.StartNew(() => WorkerLoop(_cts.Token), TaskCreationOptions.LongRunning);
 
             _logWatcher = CreateWatcher(cfg.CloudLogRoot, OnLogFs, recursive: false);
@@ -176,16 +180,25 @@ public sealed class CloudReleaseService : IDisposable
         {
             try
             {
-                // 超时清缓存 → 匹配到的 log 也归档（不按键）
+                // 超时清缓存 → 匹配 log 归档；同文件夹组若已全部结束则回车
                 if (Environment.TickCount64 - lastPurge > 1000)
                 {
                     lastPurge = Environment.TickCount64;
                     var timedOut = _cache.PurgeExpired();
-                    foreach (var dmc in timedOut)
+                    var folderKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var item in timedOut)
                     {
-                        try { ArchiveLogsContainingDmc(dmc, "timeout"); }
-                        catch (Exception ex) { _log.Warn("放行", $"超时归档 log 失败 DMC={dmc}: {ex.Message}"); }
+                        try { ArchiveLogsContainingDmc(item.Dmc, "timeout"); }
+                        catch (Exception ex) { _log.Warn("放行", $"超时归档 log 失败 DMC={item.Dmc}: {ex.Message}"); }
+                        if (!string.IsNullOrWhiteSpace(item.FolderKey))
+                        {
+                            folderKeys.Add(item.FolderKey);
+                            _folderHadTimeout[item.FolderKey] = 1;
+                            _log.Warn("放行", $"文件夹组={item.FolderKey} 发生超时，本组结束后不按回车");
+                        }
                     }
+                    foreach (var fk in folderKeys)
+                        MaybePressEnterForFolder(fk, "timeout");
                 }
 
                 // 有待确认 DMC 时周期性扫 log 目录（文件名可能是「前缀+DMC」；也防漏事件）
@@ -332,10 +345,57 @@ public sealed class CloudReleaseService : IDisposable
             return;
         }
 
-        _cache.TryRemove(dmc, out _);
-        _log.Success("放行", $"完成 DMC={dmc} {decision}，已移出缓存并归档 log");
+        // 先出队，再判断同文件夹是否还有待判定 → 全部结束后才回车
+        _cache.TryRemove(dmc, out var removedItem);
+        var folderKey = removedItem?.FolderKey ?? dmc;
+        _log.Success("放行", $"完成 DMC={dmc} {decision} 组={folderKey}，已移出缓存并归档 log");
         _processedLogs[fullKey] = 1;
         ArchiveLog(cfg, path, reason: decision);
+
+        MaybePressEnterForFolder(folderKey, decision);
+    }
+
+    /// <summary>
+    /// 同文件夹组内所有 DMC 都结束后，再按一次回车。
+    /// 单张 NG：按完 OK/NOK 立刻回车；多张：等全部 OK/NOK 后才回车。
+    /// 若该组曾有超时：不按回车。
+    /// </summary>
+    private void MaybePressEnterForFolder(string folderKey, string reason)
+    {
+        var cfg = _cfg();
+        if (!cfg.EnterAfterFolderAllDone) return;
+        folderKey = (folderKey ?? "").Trim();
+        if (string.IsNullOrEmpty(folderKey)) return;
+
+        var remain = _cache.CountInFolder(folderKey);
+        if (remain > 0)
+        {
+            _log.Info("放行", $"文件夹组={folderKey} 尚有 {remain} 条未判定，暂不回车（本次={reason}）");
+            return;
+        }
+
+        // 组内出现过超时 → 不回车
+        if (string.Equals(reason, "timeout", StringComparison.OrdinalIgnoreCase)
+            || _folderHadTimeout.ContainsKey(folderKey))
+        {
+            _log.Warn("放行", $"文件夹组={folderKey} 全部结束但含超时，不按回车（原因={reason}）");
+            _folderHadTimeout.TryRemove(folderKey, out _);
+            return;
+        }
+
+        var enterKey = string.IsNullOrWhiteSpace(cfg.ConfirmEnterKey) ? "Enter" : cfg.ConfirmEnterKey.Trim();
+        _log.Info("放行", $"文件夹组={folderKey} 全部判定结束(无超时) → 按 {enterKey}（触发原因={reason}）");
+        var ok = _keyboard.SendKey(
+            enterKey,
+            1,
+            cfg.KeyPressDelayMs,
+            string.IsNullOrWhiteSpace(cfg.TargetWindowTitleContains) ? null : cfg.TargetWindowTitleContains,
+            string.IsNullOrWhiteSpace(cfg.TargetProcessName) ? null : cfg.TargetProcessName,
+            cfg.ActivateWindowDelayMs);
+        if (!ok)
+            _log.Error("放行", $"回车键发送失败 组={folderKey} key={enterKey}");
+        else
+            _log.Success("放行", $"已回车 组={folderKey}");
     }
 
     /// <summary>

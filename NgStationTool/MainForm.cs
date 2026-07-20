@@ -32,13 +32,13 @@ public sealed class MainForm : Form
         _cache = new DmcPendingCache(_log, _cfg.PendingTimeoutSec);
         _keyboard = new KeyboardService(_log);
         _cloud = new CloudReleaseService(_log, () => _cfg, _cache, _keyboard);
-        _imageWatcher = new ImageCopyWatcher(_log, () => _cfg, (renamedDmc, path) =>
+        _imageWatcher = new ImageCopyWatcher(_log, () => _cfg, (renamedDmc, path, folderKey) =>
         {
             if (_cfg.EnableCloudRelease && _cfg.EnqueueFromImageCopyFolderName)
-                _cloud.EnqueueDmc(renamedDmc, "ImageCopyRenamed", path);
+                _cloud.EnqueueDmc(renamedDmc, "ImageCopyRenamed", path, folderKey);
         });
 
-        Text = "工位工具 · 图片命名 + 云端放行  v1.1.0";
+        Text = "工位工具 · 图片命名 + 云端放行  v1.2.1";
         Width = 980;
         Height = 640;
         StartPosition = FormStartPosition.CenterScreen;
@@ -89,15 +89,18 @@ public sealed class MainForm : Form
             FullRowSelect = true,
             GridLines = true
         };
-        _lvCache.Columns.Add("DMC(改名完整名)", 280);
-        _lvCache.Columns.Add("入队时间", 100);
-        _lvCache.Columns.Add("剩余秒", 70);
-        _lvCache.Columns.Add("来源", 120);
-        _lvCache.Columns.Add("输出图片路径", 360);
+        _lvCache.Columns.Add("DMC(改名完整名)", 220);
+        _lvCache.Columns.Add("类型", 70);
+        _lvCache.Columns.Add("文件夹组", 110);
+        _lvCache.Columns.Add("同组剩余", 70);
+        _lvCache.Columns.Add("入队时间", 80);
+        _lvCache.Columns.Add("剩余秒", 55);
+        _lvCache.Columns.Add("来源", 90);
+        _lvCache.Columns.Add("输出图片路径", 260);
         var cachePanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8) };
         var cacheTitle = new Label
         {
-            Text = "待确认 DMC 缓存（DMC=改名后完整文件名无扩展名；路径=输出目录中的图片，不是 NG 图配置目录）",
+            Text = "待确认 DMC：【单】=该夹仅1条  【多】=同夹多条 | 全组OK/NOK完才回车；有超时则不回车",
             Dock = DockStyle.Top,
             Height = 22
         };
@@ -173,7 +176,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Load += (_, _) =>
         {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.1.0 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
+            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.2.1 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
             if (_cfg.AutoStartOnLaunch)
                 StartAll();
             else
@@ -247,15 +250,43 @@ public sealed class MainForm : Form
         try
         {
             _lvCache.Items.Clear();
+            // 统计同组数量
+            var groupCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var it in items)
+            {
+                var fk = string.IsNullOrWhiteSpace(it.FolderKey) ? it.Dmc : it.FolderKey;
+                groupCount[fk] = groupCount.TryGetValue(fk, out var c) ? c + 1 : 1;
+            }
+
             foreach (var it in items)
             {
                 var left = timeout - (DateTime.Now - it.EnqueuedAt).TotalSeconds;
                 if (left < 0) left = 0;
+                var fk = string.IsNullOrWhiteSpace(it.FolderKey) ? it.Dmc : it.FolderKey;
+                var n = groupCount.TryGetValue(fk, out var gc) ? gc : 1;
+                var kind = n <= 1 ? "单" : $"多×{n}";
+
                 var lvi = new ListViewItem(it.Dmc);
+                lvi.SubItems.Add(kind);
+                lvi.SubItems.Add(it.FolderKey);
+                lvi.SubItems.Add(n.ToString());
                 lvi.SubItems.Add(it.EnqueuedAt.ToString("HH:mm:ss"));
                 lvi.SubItems.Add(((int)left).ToString());
                 lvi.SubItems.Add(it.Source);
                 lvi.SubItems.Add(it.SourcePath ?? "");
+
+                // 视觉区分：多条同组用浅橙底，单条浅绿底
+                if (n > 1)
+                {
+                    lvi.BackColor = Color.FromArgb(255, 244, 229);
+                    lvi.ForeColor = Color.FromArgb(120, 60, 0);
+                }
+                else
+                {
+                    lvi.BackColor = Color.FromArgb(232, 248, 237);
+                    lvi.ForeColor = Color.FromArgb(20, 70, 40);
+                }
+
                 _lvCache.Items.Add(lvi);
             }
         }

@@ -39,7 +39,8 @@ internal static class SelfTest
             PendingTimeoutSec = 30,
             EnqueueFromImageCopyFolderName = true,
             EnqueueFromNgImageWatch = false, // 本测只测文件夹名入队，避免输出目录二次入队干扰
-            ResultLineNumber = 2,
+            LogReadyBudgetMs = 500,
+            ResultLineNumber = 1,
             OkTokens = new List<string> { "OK" },
             NokTokens = new List<string> { "NOK" },
             OkKey = "NumPad9",
@@ -53,9 +54,9 @@ internal static class SelfTest
         var kb = new KeyboardService(log);
         AppConfig live = cfg;
         var cloud = new CloudReleaseService(log, () => live, cache, kb);
-        var img = new ImageCopyWatcher(log, () => live, (renamed, path) =>
+        var img = new ImageCopyWatcher(log, () => live, (renamed, path, folder) =>
         {
-            cloud.EnqueueDmc(renamed, "ImageCopyRenamed", path);
+            cloud.EnqueueDmc(renamed, "ImageCopyRenamed", path, folder);
         });
 
         var fail = 0;
@@ -128,9 +129,9 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: orphan log ignored (no cache)");
 
-            // 3) 有缓存 + log（前缀+DMC）
+            // 3) 有缓存 + log（前缀+DMC）→ OK 键 + 单条组立刻回车
             var dmc2 = "DMCTEST002_cam";
-            cache.TryEnqueue(dmc2, "selftest", jpg);
+            cache.TryEnqueue(dmc2, "selftest", jpg, folderKey: "solo");
             var logPath2 = Path.Combine(logs, "prefix_" + dmc2 + ".txt");
             File.WriteAllText(logPath2, "OK\n");
 
@@ -148,6 +149,44 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: DMC removed after prefixed OK log");
 
+            // 4) 同文件夹两组：先判一条不应清完组；两条都判完才结束
+            cache.ClearAll("selftest-before-folder");
+            cache.TryEnqueue("FOLDER_IMG1", "selftest", null, folderKey: "FOLDER");
+            cache.TryEnqueue("FOLDER_IMG2", "selftest", null, folderKey: "FOLDER");
+            File.WriteAllText(Path.Combine(logs, "p_FOLDER_IMG1.txt"), "OK\n");
+            deadline = DateTime.Now.AddSeconds(10);
+            while (DateTime.Now < deadline && cache.Contains("FOLDER_IMG1")) Thread.Sleep(100);
+            if (cache.Contains("FOLDER_IMG1") || !cache.Contains("FOLDER_IMG2") || cache.CountInFolder("FOLDER") != 1)
+            {
+                Console.WriteLine("FAIL: folder batch partial: " + string.Join(",", cache.Snapshot().Select(x => x.Dmc)));
+                fail++;
+            }
+            else Console.WriteLine("PASS: first of folder judged, second still pending");
+
+            File.WriteAllText(Path.Combine(logs, "p_FOLDER_IMG2.txt"), "OK\n");
+            deadline = DateTime.Now.AddSeconds(10);
+            while (DateTime.Now < deadline && cache.CountInFolder("FOLDER") > 0) Thread.Sleep(100);
+            if (cache.CountInFolder("FOLDER") != 0)
+            {
+                Console.WriteLine("FAIL: folder not fully cleared remain=" + string.Join(",", cache.Snapshot().Select(x => x.Dmc)));
+                try
+                {
+                    Console.WriteLine("--- logs dir ---");
+                    foreach (var f in Directory.EnumerateFiles(logs)) Console.WriteLine(f + " | " + File.ReadAllText(f));
+                    Console.WriteLine("--- test_log tail ---");
+                    var tl = Path.Combine(root, "test_log.txt");
+                    if (File.Exists(tl))
+                    {
+                        var lines = File.ReadAllLines(tl);
+                        foreach (var line in lines.Skip(Math.Max(0, lines.Length - 40)))
+                            Console.WriteLine(line);
+                    }
+                }
+                catch (Exception ex) { Console.WriteLine(ex); }
+                fail++;
+            }
+            else Console.WriteLine("PASS: folder all judged");
+
             var archived = Directory.Exists(archive) && Directory.EnumerateFiles(archive).Any(f =>
                 Path.GetFileName(f).IndexOf(dmc2, StringComparison.OrdinalIgnoreCase) >= 0);
             if (!archived && File.Exists(logPath2))
@@ -157,8 +196,8 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: log archived or consumed");
 
-            // 4) 超时清除
-            cache.TryEnqueue("TIMEOUTX", "selftest", null);
+            // 5) 超时清除
+            cache.TryEnqueue("TIMEOUTX", "selftest", null, folderKey: "T");
             cache.SetTimeoutSec(1);
             Thread.Sleep(1500);
             cache.PurgeExpired();
