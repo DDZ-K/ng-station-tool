@@ -114,10 +114,63 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: two renamed DMCs in cache");
 
+            // 1b) 单张文件夹：只 1 张图也必须拷贝+入队（回归：单张不行）
+            cache.ForceRemove(expected1, "selftest single prep");
+            cache.ForceRemove(expected2, "selftest single prep");
+            var dmcSolo = "DMCTEST_SOLO";
+            var subSolo = Path.Combine(watch, dmcSolo);
+            Directory.CreateDirectory(subSolo);
+            Thread.Sleep(150);
+            var soloJpg = Path.Combine(subSolo, "only.jpg");
+            File.WriteAllBytes(soloJpg, buf);
+            var expectedSolo = dmcSolo + "_only";
+            deadline = DateTime.Now.AddSeconds(12);
+            var soloOk = false;
+            while (DateTime.Now < deadline)
+            {
+                if (cache.Contains(expectedSolo)
+                    && Directory.EnumerateFiles(output, "*", SearchOption.AllDirectories)
+                        .Any(f => Path.GetFileNameWithoutExtension(f)
+                            .Equals(expectedSolo, StringComparison.OrdinalIgnoreCase)))
+                {
+                    soloOk = true;
+                    break;
+                }
+                Thread.Sleep(100);
+            }
+            if (!soloOk)
+            {
+                Console.WriteLine("FAIL: single-image folder must copy+enqueue, cache=" +
+                    string.Join(",", cache.Snapshot().Select(x => x.Dmc)));
+                fail++;
+            }
+            else Console.WriteLine("PASS: single-image folder enqueued");
+
+            // 1c) 同大小已存在时：重写源图时间戳后仍应再入队（不要求再拷一份）
+            cache.ForceRemove(expectedSolo, "selftest same-size prep");
+            Thread.Sleep(200);
+            // 覆盖写入 → LastWriteTime 变新
+            File.WriteAllBytes(soloJpg, buf);
+            File.SetLastWriteTimeUtc(soloJpg, DateTime.UtcNow.AddSeconds(1));
+            deadline = DateTime.Now.AddSeconds(12);
+            var requeueOk = false;
+            while (DateTime.Now < deadline)
+            {
+                if (cache.Contains(expectedSolo)) { requeueOk = true; break; }
+                Thread.Sleep(100);
+            }
+            if (!requeueOk)
+            {
+                Console.WriteLine("FAIL: same-size re-write must re-enqueue single DMC");
+                fail++;
+            }
+            else Console.WriteLine("PASS: same-size re-write re-enqueued");
+
             // 2) 无缓存时 log 应忽略
             img.Stop();
             cache.ForceRemove(expected1, "selftest gate");
             cache.ForceRemove(expected2, "selftest gate");
+            cache.ForceRemove(expectedSolo, "selftest gate");
             Thread.Sleep(200);
             var orphanLog = Path.Combine(logs, expected1 + ".log");
             File.WriteAllText(orphanLog, "line1\nOK\n");

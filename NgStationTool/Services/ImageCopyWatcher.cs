@@ -12,7 +12,11 @@ public sealed class ImageCopyWatcher : IDisposable
     private readonly AppLogger _log;
     private readonly Func<AppConfig> _cfg;
     private readonly Action<string, string, string>? _onCopiedRenamedDmc; // renamedStem, outputPath, folderKey
-    private readonly ConcurrentDictionary<string, byte> _copiedOk = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// 源路径 → 已成功处理时的 LastWriteTimeUtc.Ticks。
+    /// 同一写入版本不重复拷贝；源被重新写入（Ticks 变大）可再次处理并入队。
+    /// </summary>
+    private readonly ConcurrentDictionary<string, long> _handledWriteTicks = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>一级文件夹 → 最后活动时间 TickCount64</summary>
     private readonly ConcurrentDictionary<string, long> _folderTouch = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>正在整批处理的文件夹，防重入</summary>
@@ -57,7 +61,7 @@ public sealed class ImageCopyWatcher : IDisposable
             }
 
             _cts = new CancellationTokenSource();
-            _copiedOk.Clear();
+            _handledWriteTicks.Clear();
             _folderTouch.Clear();
             _folderBusy.Clear();
             _startedAtUtc = DateTime.UtcNow;
@@ -222,15 +226,25 @@ public sealed class ImageCopyWatcher : IDisposable
         var folderName = Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         if (string.IsNullOrEmpty(folderName)) return;
 
-        // 1) 列本会话新图且未成功拷过
+        // 1) 列本会话新图：未处理过的写入版本才进候选
         var candidates = new List<string>();
+        var skippedAlready = 0;
+        var skippedOld = 0;
         try
         {
             foreach (var f in Directory.EnumerateFiles(folder))
             {
                 if (!cfg.ImageExtSet().Contains(Path.GetExtension(f))) continue;
-                if (_copiedOk.ContainsKey(f)) continue;
-                if (!IsSessionFreshFile(f)) continue;
+                if (!IsSessionFreshFile(f))
+                {
+                    skippedOld++;
+                    continue;
+                }
+                if (IsSameWriteAlreadyHandled(f))
+                {
+                    skippedAlready++;
+                    continue;
+                }
                 candidates.Add(f);
             }
         }
@@ -240,7 +254,17 @@ public sealed class ImageCopyWatcher : IDisposable
             return;
         }
 
-        if (candidates.Count == 0) return;
+        if (candidates.Count == 0)
+        {
+            // 单张复测时常见：源已处理过或时间戳偏旧，以前会静默 return 看起来像「单张不行」
+            if (skippedAlready > 0 || skippedOld > 0)
+            {
+                _log.Info("图片",
+                    $"整夹无新候选 文件夹={folderName} 已处理同版本={skippedAlready} 非本会话新图={skippedOld} " +
+                    "（若要再入队：重写/覆盖源图，或删掉输出同名文件后再投一次）");
+            }
+            return;
+        }
 
         _log.Info("图片", $"整夹待处理 文件夹={folderName} 候选={candidates.Count} 静默已到，开始等全部就绪…");
 
@@ -266,7 +290,7 @@ public sealed class ImageCopyWatcher : IDisposable
                     pending.Remove(path);
                     continue;
                 }
-                if (_copiedOk.ContainsKey(path))
+                if (IsSameWriteAlreadyHandled(path))
                 {
                     pending.Remove(path);
                     continue;
@@ -320,7 +344,7 @@ public sealed class ImageCopyWatcher : IDisposable
             try
             {
                 if (!File.Exists(path)) continue;
-                if (_copiedOk.ContainsKey(path)) continue;
+                if (IsSameWriteAlreadyHandled(path)) continue;
 
                 // 再确认一次未被占用
                 if (!FileReady.IsUnlocked(path) || !FileReady.HasImageMagic(path))
@@ -331,6 +355,7 @@ public sealed class ImageCopyWatcher : IDisposable
 
                 var targetName = folderName + "_" + Path.GetFileName(path);
                 var targetPath = Path.Combine(dayDir, targetName);
+                var skippedCopySameSize = false;
 
                 if (cfg.SkipIfSameSizeExists && File.Exists(targetPath))
                 {
@@ -339,28 +364,35 @@ public sealed class ImageCopyWatcher : IDisposable
                         var dstLen = new FileInfo(targetPath).Length;
                         if (dstLen == item.length)
                         {
-                            _copiedOk[path] = 1;
-                            _log.Skip("图片", $"同大小已存在(整夹) | {path} → {targetPath}");
-                            // 整夹场景：同大小跳过仍视为本张已处理，但通常不重复入缓存
-                            continue;
+                            // 输出已有同大小文件：不重复拷贝，但仍入 DMC 队列
+                            // （单张复测最常见：多张跑过后只再投 1 张旧名）
+                            skippedCopySameSize = true;
+                            _log.Skip("图片",
+                                $"同大小已存在，跳过拷贝仍入队 | {path} → {targetPath}");
                         }
                     }
-                    catch { /* fallthrough */ }
-                    targetPath = GetUniqueTargetPath(dayDir, targetName);
+                    catch { /* fallthrough to unique name */ }
+
+                    if (!skippedCopySameSize)
+                        targetPath = GetUniqueTargetPath(dayDir, targetName);
                 }
                 else if (File.Exists(targetPath))
                 {
                     targetPath = GetUniqueTargetPath(dayDir, targetName);
                 }
 
-                File.Copy(path, targetPath, overwrite: false);
-                _copiedOk[path] = 1;
+                if (!skippedCopySameSize)
+                {
+                    File.Copy(path, targetPath, overwrite: false);
+                    _log.Success("图片",
+                        $"整夹拷贝成功 ready={item.readyMs}ms | {path} → {targetPath}");
+                }
+
+                MarkHandled(path);
                 okCount++;
 
                 var renamedStem = Path.GetFileNameWithoutExtension(targetPath);
                 dmcList.Add(renamedStem);
-                _log.Success("图片",
-                    $"整夹拷贝成功 ready={item.readyMs}ms | {path} → {targetPath}");
 
                 if (cfg.EnableCloudRelease && cfg.EnqueueFromImageCopyFolderName)
                     _onCopiedRenamedDmc?.Invoke(renamedStem, targetPath, folderName);
@@ -387,6 +419,26 @@ public sealed class ImageCopyWatcher : IDisposable
             return fi.CreationTimeUtc >= threshold || fi.LastWriteTimeUtc >= threshold;
         }
         catch { return false; }
+    }
+
+    private static long GetWriteTicks(string path)
+    {
+        try { return File.GetLastWriteTimeUtc(path).Ticks; }
+        catch { return 0; }
+    }
+
+    private bool IsSameWriteAlreadyHandled(string path)
+    {
+        if (!_handledWriteTicks.TryGetValue(path, out var prev)) return false;
+        var cur = GetWriteTicks(path);
+        return cur > 0 && cur <= prev;
+    }
+
+    private void MarkHandled(string path)
+    {
+        var ticks = GetWriteTicks(path);
+        if (ticks <= 0) ticks = DateTime.UtcNow.Ticks;
+        _handledWriteTicks[path] = ticks;
     }
 
     private static string? GetFirstLevelFolder(string watchRoot, string path)
