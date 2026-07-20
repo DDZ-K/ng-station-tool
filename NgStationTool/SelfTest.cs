@@ -202,6 +202,25 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: DMC removed after prefixed OK log");
 
+            // 3b) Result=NOK 必须判 NOK（不能因含 OK 子串而当 OK）
+            var dmcNok = "DMCTEST_NOK_cam";
+            cache.TryEnqueue(dmcNok, "selftest", null, folderKey: "solo_nok");
+            var logNok = Path.Combine(logs, "prefix_" + dmcNok + ".txt");
+            File.WriteAllText(logNok, "ERER\nResult=NOK\n");
+            deadline = DateTime.Now.AddSeconds(6);
+            var nokLeft = true;
+            while (DateTime.Now < deadline)
+            {
+                if (!cache.Contains(dmcNok)) { nokLeft = false; break; }
+                Thread.Sleep(100);
+            }
+            if (nokLeft)
+            {
+                Console.WriteLine("FAIL: Result=NOK must dequeue DMC (not confuse with OK substring)");
+                fail++;
+            }
+            else Console.WriteLine("PASS: Result=NOK judged without OK false-positive");
+
             // 4) 同文件夹两组：先判一条不应清完组；两条都判完才结束
             cache.ClearAll("selftest-before-folder");
             cache.TryEnqueue("FOLDER_IMG1", "selftest", null, folderKey: "FOLDER");

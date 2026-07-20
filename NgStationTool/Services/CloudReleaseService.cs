@@ -419,9 +419,9 @@ public sealed class CloudReleaseService : IDisposable
     }
 
     /// <summary>
-    /// 解析 OK/NOK：整份 log 文本中「包含」词表即可（不限行号）。
-    /// 例：ERER + Result=OK → 命中 OK；Result=NOK → 命中 NOK。
-    /// 先扫 NOK 词表再扫 OK，避免 NOK 被 OK 子串误判；同组内更长词优先。
+    /// 解析 OK/NOK：整份 log 任意位置出现词表即可（不限行号）。
+    /// 用「词边界」匹配：OK 不会命中 NOK 里的子串；Result=OK / Result=NOK 均可。
+    /// 若同时出现独立 OK 与 NOK 词，优先 NOK。
     /// </summary>
     private static bool TryExtractDecision(
         string text,
@@ -439,51 +439,73 @@ public sealed class CloudReleaseService : IDisposable
             return false;
         }
 
-        var cmp = cfg.ResultMatchIgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var ignoreCase = cfg.ResultMatchIgnoreCase;
         var hay = text;
 
-        // NOK 优先（NOK 含 OK 子串），再 OK；词越长越优先
-        string? bestNok = null;
-        foreach (var n in (cfg.NokTokens ?? new List<string>()).OrderByDescending(x => (x ?? "").Trim().Length))
+        // 更长词优先；NOK 组整体优先于 OK 组
+        if (TryFindToken(hay, cfg.NokTokens, ignoreCase, out var nokTok))
         {
-            var t = (n ?? "").Trim();
-            if (t.Length == 0) continue;
-            if (hay.IndexOf(t, cmp) >= 0)
-            {
-                bestNok = t;
-                break;
-            }
-        }
-        if (bestNok != null)
-        {
-            token = bestNok;
+            token = nokTok;
             decision = "NOK";
-            note = "contains:NOK";
+            note = "token:NOK";
             return true;
         }
-
-        string? bestOk = null;
-        foreach (var o in (cfg.OkTokens ?? new List<string>()).OrderByDescending(x => (x ?? "").Trim().Length))
+        if (TryFindToken(hay, cfg.OkTokens, ignoreCase, out var okTok))
         {
-            var t = (o ?? "").Trim();
-            if (t.Length == 0) continue;
-            if (hay.IndexOf(t, cmp) >= 0)
-            {
-                bestOk = t;
-                break;
-            }
-        }
-        if (bestOk != null)
-        {
-            token = bestOk;
+            token = okTok;
             decision = "OK";
-            note = "contains:OK";
+            note = "token:OK";
             return true;
         }
 
-        note = "全文未包含 OK/NOK 词表";
+        note = "全文未出现独立的 OK/NOK 词表项";
         return false;
     }
+
+    /// <summary>
+    /// 在全文中查找词表：必须作为独立词出现（左右不能是字母/数字）。
+    /// 这样 Result=OK 命中 OK；Result=NOK 不会因内部含 OK 而误判。
+    /// </summary>
+    private static bool TryFindToken(
+        string hay,
+        IEnumerable<string>? tokens,
+        bool ignoreCase,
+        out string found)
+    {
+        found = "";
+        if (tokens == null) return false;
+        var cmp = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var raw in tokens.OrderByDescending(x => (x ?? "").Trim().Length))
+        {
+            var t = (raw ?? "").Trim();
+            if (t.Length == 0) continue;
+            if (ContainsWholeToken(hay, t, cmp))
+            {
+                found = t;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool ContainsWholeToken(string hay, string token, StringComparison cmp)
+    {
+        var start = 0;
+        while (start <= hay.Length - token.Length)
+        {
+            var i = hay.IndexOf(token, start, cmp);
+            if (i < 0) return false;
+            var leftOk = i == 0 || !IsWordChar(hay[i - 1]);
+            var end = i + token.Length;
+            var rightOk = end >= hay.Length || !IsWordChar(hay[end]);
+            if (leftOk && rightOk) return true;
+            start = i + 1;
+        }
+        return false;
+    }
+
+    private static bool IsWordChar(char c)
+        => char.IsLetterOrDigit(c) || c == '_';
 
     private void ArchiveLogsContainingDmc(string dmc, string reason)
     {

@@ -38,7 +38,7 @@ public sealed class MainForm : Form
                 _cloud.EnqueueDmc(renamedDmc, "ImageCopyRenamed", path, folderKey);
         });
 
-        Text = "工位工具 · 图片命名 + 云端放行  v1.2.4";
+        Text = "工位工具 · 图片命名 + 云端放行  v1.2.5";
         Width = 980;
         Height = 640;
         StartPosition = FormStartPosition.CenterScreen;
@@ -176,7 +176,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Load += (_, _) =>
         {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.2.4 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
+            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.2.5 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
             if (_cfg.AutoStartOnLaunch)
                 StartAll();
             else
