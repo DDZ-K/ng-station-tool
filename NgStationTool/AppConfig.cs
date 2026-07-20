@@ -44,7 +44,7 @@ public sealed class AppConfig
     /// <summary>处理后的 log 归档目录（空则改名为 .done）。</summary>
     public string CloudLogArchiveRoot { get; set; } = @"E:\Download\AI\CloudResult\done";
     public List<string> LogExtensions { get; set; } = new() { ".log", ".txt" };
-    /// <summary>1-based 行号，第 2 行放 OK/NOK。</summary>
+    /// <summary>已废弃字段：仅兼容旧 config.json，结果改为全文包含匹配，不再按行号。</summary>
     public int ResultLineNumber { get; set; } = 2;
     public List<string> OkTokens { get; set; } = new() { "OK", "PASS" };
     public List<string> NokTokens { get; set; } = new() { "NOK", "NG", "FAIL" };

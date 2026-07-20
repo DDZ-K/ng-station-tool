@@ -40,7 +40,7 @@ internal static class SelfTest
             EnqueueFromImageCopyFolderName = true,
             EnqueueFromNgImageWatch = false, // 本测只测文件夹名入队，避免输出目录二次入队干扰
             LogReadyBudgetMs = 500,
-            ResultLineNumber = 1,
+            ResultLineNumber = 1, // 废弃字段，忽略
             OkTokens = new List<string> { "OK" },
             NokTokens = new List<string> { "NOK" },
             OkKey = "NumPad9",
@@ -173,7 +173,7 @@ internal static class SelfTest
             cache.ForceRemove(expectedSolo, "selftest gate");
             Thread.Sleep(200);
             var orphanLog = Path.Combine(logs, expected1 + ".log");
-            File.WriteAllText(orphanLog, "line1\nOK\n");
+            File.WriteAllText(orphanLog, "ERER\nResult=OK\n");
             Thread.Sleep(1500);
             if (cache.Contains(expected1))
             {
@@ -182,11 +182,11 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: orphan log ignored (no cache)");
 
-            // 3) 有缓存 + log（前缀+DMC）→ OK 键 + 单条组立刻回车
+            // 3) 有缓存 + log（前缀+DMC）+ 全文 Result=OK → OK 键 + 单条组立刻回车
             var dmc2 = "DMCTEST002_cam";
             cache.TryEnqueue(dmc2, "selftest", jpg, folderKey: "solo");
             var logPath2 = Path.Combine(logs, "prefix_" + dmc2 + ".txt");
-            File.WriteAllText(logPath2, "OK\n");
+            File.WriteAllText(logPath2, "ERER\nResult=OK\n");
 
             deadline = DateTime.Now.AddSeconds(6);
             var left = true;
@@ -206,7 +206,7 @@ internal static class SelfTest
             cache.ClearAll("selftest-before-folder");
             cache.TryEnqueue("FOLDER_IMG1", "selftest", null, folderKey: "FOLDER");
             cache.TryEnqueue("FOLDER_IMG2", "selftest", null, folderKey: "FOLDER");
-            File.WriteAllText(Path.Combine(logs, "p_FOLDER_IMG1.txt"), "OK\n");
+            File.WriteAllText(Path.Combine(logs, "p_FOLDER_IMG1.txt"), "ERER\nResult=OK\n");
             deadline = DateTime.Now.AddSeconds(10);
             while (DateTime.Now < deadline && cache.Contains("FOLDER_IMG1")) Thread.Sleep(100);
             if (cache.Contains("FOLDER_IMG1") || !cache.Contains("FOLDER_IMG2") || cache.CountInFolder("FOLDER") != 1)
@@ -216,7 +216,7 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: first of folder judged, second still pending");
 
-            File.WriteAllText(Path.Combine(logs, "p_FOLDER_IMG2.txt"), "OK\n");
+            File.WriteAllText(Path.Combine(logs, "p_FOLDER_IMG2.txt"), "ERER\nResult=OK\n");
             deadline = DateTime.Now.AddSeconds(10);
             while (DateTime.Now < deadline && cache.CountInFolder("FOLDER") > 0) Thread.Sleep(100);
             if (cache.CountInFolder("FOLDER") != 0)

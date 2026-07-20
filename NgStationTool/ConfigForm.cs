@@ -28,7 +28,6 @@ public sealed class ConfigForm : Form
     private readonly CheckBox _enqueueNgWatch;
     private readonly TextBox _ngRoot;
     private readonly ComboBox _dmcFromImage;
-    private readonly NumericUpDown _resultLine;
     private readonly TextBox _okTokens;
     private readonly TextBox _nokTokens;
     private readonly TextBox _okKey;
@@ -138,11 +137,10 @@ public sealed class ConfigForm : Form
             cfg.DmcFromImage is "ParentFolder" ? "ParentFolder" : "FileStem");
 
         AddHeader(p2, ref y, "结果判定与按键");
-        AddLabel(p2, ref y, "优先读取结果的行号（1=第一行；单行 OK 也会自动识别）");
-        _resultLine = AddNum(p2, ref y, cfg.ResultLineNumber, 1, 50);
-        AddLabel(p2, ref y, "OK 词表（逗号分隔）");
+        AddLabel(p2, ref y, "判定方式：整份 log 任意位置「包含」词表即可（如 Result=OK / Result=NOK）");
+        AddLabel(p2, ref y, "OK 词表（逗号分隔，命中即 OK）");
         _okTokens = AddTb(p2, ref y, string.Join(",", cfg.OkTokens));
-        AddLabel(p2, ref y, "NOK 词表（逗号分隔）");
+        AddLabel(p2, ref y, "NOK 词表（逗号分隔；优先于 OK，避免 NOK 被 OK 误判）");
         _nokTokens = AddTb(p2, ref y, string.Join(",", cfg.NokTokens));
         AddLabel(p2, ref y, "OK 键（例：NumPad9 / Home / PageUp / PgUp）");
         _okKey = AddTb(p2, ref y, cfg.OkKey);
@@ -347,7 +345,6 @@ public sealed class ConfigForm : Form
         src.EnqueueFromNgImageWatch = _enqueueNgWatch.Checked;
         src.NgImageRoot = _ngRoot.Text.Trim();
         src.DmcFromImage = _dmcFromImage.SelectedItem?.ToString() ?? "FileStem";
-        src.ResultLineNumber = (int)_resultLine.Value;
         src.OkTokens = SplitList(_okTokens.Text);
         src.NokTokens = SplitList(_nokTokens.Text);
         if (src.OkTokens.Count == 0) src.OkTokens = new List<string> { "OK" };

@@ -22,7 +22,6 @@
   "cloudLogRoot": "D:\\CloudResult",
   "cloudLogArchiveRoot": "D:\\CloudResult\\done",
   "logExtensions": [ ".log", ".txt" ],
-  "resultLineNumber": 2,
   "okTokens": [ "OK", "PASS" ],
   "nokTokens": [ "NOK", "NG", "FAIL" ],
   "resultMatchIgnoreCase": true,

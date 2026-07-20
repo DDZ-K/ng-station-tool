@@ -419,10 +419,9 @@ public sealed class CloudReleaseService : IDisposable
     }
 
     /// <summary>
-    /// 解析 OK/NOK：
-    /// 1) 优先配置行号（若存在且非空）
-    /// 2) 否则最后一行非空
-    /// 3) 再否则任意行等于 OK/NOK 词表
+    /// 解析 OK/NOK：整份 log 文本中「包含」词表即可（不限行号）。
+    /// 例：ERER + Result=OK → 命中 OK；Result=NOK → 命中 NOK。
+    /// 先扫 NOK 词表再扫 OK，避免 NOK 被 OK 子串误判；同组内更长词优先。
     /// </summary>
     private static bool TryExtractDecision(
         string text,
@@ -434,78 +433,55 @@ public sealed class CloudReleaseService : IDisposable
         token = "";
         decision = "";
         note = "";
-        var rawLines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            note = "内容为空";
+            return false;
+        }
+
         var cmp = cfg.ResultMatchIgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var hay = text;
 
-        string? MatchToken(string t)
+        // NOK 优先（NOK 含 OK 子串），再 OK；词越长越优先
+        string? bestNok = null;
+        foreach (var n in (cfg.NokTokens ?? new List<string>()).OrderByDescending(x => (x ?? "").Trim().Length))
         {
-            t = (t ?? "").Trim();
-            if (t.Length == 0) return null;
-            // 允许行内只有 OK / NOK，或带空白
-            foreach (var ok in cfg.OkTokens)
-            {
-                var o = ok.Trim();
-                if (o.Length == 0) continue;
-                if (string.Equals(t, o, cmp)) return "OK";
-                // 行内容就是词，或词单独成段
-            }
-            foreach (var nok in cfg.NokTokens)
-            {
-                var n = nok.Trim();
-                if (n.Length == 0) continue;
-                if (string.Equals(t, n, cmp)) return "NOK";
-            }
-            return null;
-        }
-
-        // 1) 配置行
-        var lineIdx = Math.Max(1, cfg.ResultLineNumber) - 1;
-        if (rawLines.Length > lineIdx)
-        {
-            var t = (rawLines[lineIdx] ?? "").Trim();
-            var d = MatchToken(t);
-            if (d != null)
-            {
-                token = t;
-                decision = d;
-                note = $"line#{cfg.ResultLineNumber}";
-                return true;
-            }
-        }
-
-        // 2) 最后非空行
-        for (var i = rawLines.Length - 1; i >= 0; i--)
-        {
-            var t = (rawLines[i] ?? "").Trim();
+            var t = (n ?? "").Trim();
             if (t.Length == 0) continue;
-            var d = MatchToken(t);
-            if (d != null)
+            if (hay.IndexOf(t, cmp) >= 0)
             {
-                token = t;
-                decision = d;
-                note = $"lastNonEmpty#{i + 1}";
-                return true;
+                bestNok = t;
+                break;
             }
-            break; // 最后非空行不是结果词则继续扫全部
         }
-
-        // 3) 任意行
-        for (var i = 0; i < rawLines.Length; i++)
+        if (bestNok != null)
         {
-            var t = (rawLines[i] ?? "").Trim();
-            var d = MatchToken(t);
-            if (d != null)
-            {
-                token = t;
-                decision = d;
-                note = $"anyLine#{i + 1}";
-                return true;
-            }
+            token = bestNok;
+            decision = "NOK";
+            note = "contains:NOK";
+            return true;
         }
 
-        note = rawLines.Length < cfg.ResultLineNumber
-            ? $"行数不足(需第{cfg.ResultLineNumber}行，实际{rawLines.Length})"
-            : "未匹配 OK/NOK 词表";
+        string? bestOk = null;
+        foreach (var o in (cfg.OkTokens ?? new List<string>()).OrderByDescending(x => (x ?? "").Trim().Length))
+        {
+            var t = (o ?? "").Trim();
+            if (t.Length == 0) continue;
+            if (hay.IndexOf(t, cmp) >= 0)
+            {
+                bestOk = t;
+                break;
+            }
+        }
+        if (bestOk != null)
+        {
+            token = bestOk;
+            decision = "OK";
+            note = "contains:OK";
+            return true;
+        }
+
+        note = "全文未包含 OK/NOK 词表";
         return false;
     }
 
