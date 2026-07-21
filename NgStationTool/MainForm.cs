@@ -64,8 +64,23 @@ public sealed class MainForm : Form
                 _log.Error("HARAN", "Flush 暂存失败: " + ex.Message);
             }
         };
+        // 轮询持续 Waiting 时也冲刷（避免只触发一次上升沿、后续多图卡在暂存）
+        _haran.StillWaiting += () =>
+        {
+            try
+            {
+                if (_imageWatcher.StagedCount <= 0) return;
+                var n = _imageWatcher.FlushStagedToOutput();
+                if (n > 0)
+                    _log.Success("HARAN", $"Waiting 持续中：又输出暂存图 {n} 张");
+            }
+            catch (Exception ex)
+            {
+                _log.Error("HARAN", "持续 Flush 失败: " + ex.Message);
+            }
+        };
 
-        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.1";
+        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.2";
         Width = 980;
         Height = 640;
         StartPosition = FormStartPosition.CenterScreen;
@@ -203,7 +218,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Load += (_, _) =>
         {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.1 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
+            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.2 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
             if (_cfg.AutoStartOnLaunch)
                 StartAll();
             else

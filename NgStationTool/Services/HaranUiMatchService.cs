@@ -32,6 +32,8 @@ public sealed class HaranUiMatchService : IDisposable
     public event Action<MatchKind>? StateChanged;
     /// <summary>刚进入 Waiting（上升沿）</summary>
     public event Action? EnteredWaiting;
+    /// <summary>持续处于 Waiting（每轮轮询），用于冲刷后续暂存</summary>
+    public event Action? StillWaiting;
 
     public HaranUiMatchService(AppLogger log, Func<AppConfig> cfg)
     {
@@ -99,6 +101,11 @@ public sealed class HaranUiMatchService : IDisposable
                 if (kind == _last)
                 {
                     _stableHits = Math.Min(_stableHits + 1, 100);
+                    // 已在 Waiting：每轮通知一次，便于冲刷新入队的暂存图
+                    if (kind == MatchKind.Waiting)
+                    {
+                        try { StillWaiting?.Invoke(); } catch { /* */ }
+                    }
                 }
                 else
                 {
@@ -185,7 +192,10 @@ public sealed class HaranUiMatchService : IDisposable
         }
 
         var min = cfg.HaranMinScore;
-        if (bestWait >= min && bestWait >= bestIdle)
+        // 两者都过阈值且接近时，优先 Waiting（避免真实 Waiting 被空闲模板 0.002 之差压过）
+        // 空闲模板常与待判底栏相似度都很高，会导致一直 Idle、暂存永不输出。
+        const double waitBias = 0.03;
+        if (bestWait >= min && bestWait + waitBias >= bestIdle)
         {
             hitFile = hitWait;
             return MatchKind.Waiting;
@@ -194,6 +204,11 @@ public sealed class HaranUiMatchService : IDisposable
         {
             hitFile = hitIdle;
             return MatchKind.Idle;
+        }
+        if (bestWait >= min)
+        {
+            hitFile = hitWait;
+            return MatchKind.Waiting;
         }
         return MatchKind.Unknown;
     }
