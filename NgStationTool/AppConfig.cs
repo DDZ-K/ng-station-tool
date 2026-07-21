@@ -79,6 +79,33 @@ public sealed class AppConfig
     public int MaxLogLines { get; set; } = 500;
     public int UiRefreshMs { get; set; } = 500;
 
+    // ---- HARAN 界面就绪门闩（Waiting for Input）----
+    /// <summary>启用后：图片先暂存改名，匹配到 Waiting 再进 Out；可选限制按键。</summary>
+    public bool EnableHaranUiGate { get; set; } = false;
+    /// <summary>为 true 时仅在 Waiting 状态才允许模拟按键。</summary>
+    public bool HaranGateKeys { get; set; } = true;
+    public string HaranWindowTitleFilter { get; set; } = "HARAN;Repair Station;Semi-automatic";
+    /// <summary>模板根目录（下含 idle/ waiting/）</summary>
+    public string HaranTemplateRoot { get; set; } = "";
+    public int HaranPollMs { get; set; } = 300;
+    public double HaranMinScore { get; set; } = 0.86;
+    /// <summary>连续多少帧一致才切换状态（防闪）</summary>
+    public int HaranStableFrames { get; set; } = 2;
+    public bool HaranRoiFromBottom { get; set; } = true;
+    public int HaranRoiBottomOffset { get; set; } = 0;
+    public int HaranRoiLeft { get; set; } = 0;
+    public int HaranRoiTop { get; set; } = 0;
+    /// <summary>0=铺满到右边</summary>
+    public int HaranRoiWidth { get; set; } = 0;
+    public int HaranRoiHeight { get; set; } = 48;
+
+    public string ResolvedHaranTemplateRoot()
+    {
+        if (!string.IsNullOrWhiteSpace(HaranTemplateRoot))
+            return HaranTemplateRoot;
+        return Path.Combine(AppContext.BaseDirectory, "haran-templates");
+    }
+
     public static string DefaultPath
     {
         get
@@ -97,7 +124,12 @@ public sealed class AppConfig
             {
                 var json = File.ReadAllText(path);
                 var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts());
-                if (cfg != null) return cfg;
+                if (cfg != null)
+                {
+                    if (string.IsNullOrWhiteSpace(cfg.HaranTemplateRoot))
+                        cfg.HaranTemplateRoot = cfg.ResolvedHaranTemplateRoot();
+                    return cfg;
+                }
             }
         }
         catch

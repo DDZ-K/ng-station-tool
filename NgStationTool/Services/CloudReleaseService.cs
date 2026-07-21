@@ -14,6 +14,8 @@ public sealed class CloudReleaseService : IDisposable
     private readonly Func<AppConfig> _cfg;
     private readonly DmcPendingCache _cache;
     private readonly KeyboardService _keyboard;
+    private readonly Func<bool>? _canPressKeys; // null/true=可按
+
     private FileSystemWatcher? _imgWatcher;
     private FileSystemWatcher? _logWatcher;
     private readonly ConcurrentQueue<string> _imgQ = new();
@@ -33,12 +35,14 @@ public sealed class CloudReleaseService : IDisposable
         AppLogger log,
         Func<AppConfig> cfg,
         DmcPendingCache cache,
-        KeyboardService keyboard)
+        KeyboardService keyboard,
+        Func<bool>? canPressKeys = null)
     {
         _log = log;
         _cfg = cfg;
         _cache = cache;
         _keyboard = keyboard;
+        _canPressKeys = canPressKeys;
     }
 
     public void EnqueueDmc(string dmc, string source, string? path = null, string? folderKey = null)
@@ -331,6 +335,12 @@ public sealed class CloudReleaseService : IDisposable
         var keyName = decision == "OK" ? cfg.OkKey : cfg.NokKey;
         _log.Info("放行", $"命中 DMC={dmc} 结果={decision} token={token} log={Path.GetFileName(path)} → {keyName}");
 
+        if (_canPressKeys != null && !_canPressKeys())
+        {
+            _log.Warn("放行", $"HARAN 未处于 Waiting，暂不按键，保留缓存 DMC={dmc}");
+            return;
+        }
+
         var okPress = _keyboard.SendKey(
             keyName,
             cfg.KeyRepeatCount,
@@ -384,6 +394,11 @@ public sealed class CloudReleaseService : IDisposable
         }
 
         var enterKey = string.IsNullOrWhiteSpace(cfg.ConfirmEnterKey) ? "Enter" : cfg.ConfirmEnterKey.Trim();
+        if (_canPressKeys != null && !_canPressKeys())
+        {
+            _log.Warn("放行", $"文件夹组={folderKey} 应回车但 HARAN 非 Waiting，跳过回车");
+            return;
+        }
         _log.Info("放行", $"文件夹组={folderKey} 全部判定结束(无超时) → 按 {enterKey}（触发原因={reason}）");
         var ok = _keyboard.SendKey(
             enterKey,

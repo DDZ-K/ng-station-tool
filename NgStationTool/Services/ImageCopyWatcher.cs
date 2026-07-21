@@ -4,22 +4,34 @@ using System.Diagnostics;
 namespace NgStationTool.Services;
 
 /// <summary>
-/// 一级子目录图片 → 等文件夹内「本会话新图」静默后，一次性全部改名复制到输出目录。
-/// 源文件不动；每张成功拷贝各自入 DMC 缓存（改名完整名）。
+/// 一级子目录图片 → 等文件夹静默后整夹改名；
+/// 若启用 HARAN 门闩且当前非 Waiting：先暂存，不进 OutputRoot、不入 DMC；
+/// 匹配到 Waiting 后再 Flush 到 OutputRoot 并入 DMC。
 /// </summary>
 public sealed class ImageCopyWatcher : IDisposable
 {
     private readonly AppLogger _log;
     private readonly Func<AppConfig> _cfg;
     private readonly Action<string, string, string>? _onCopiedRenamedDmc; // renamedStem, outputPath, folderKey
+    private readonly Func<bool>? _canOutputToOut; // null/true=可出 out；false=暂存
+
+    private sealed class StagedFile
+    {
+        public string SourcePath = "";
+        public string TargetFileName = "";
+        public long Length;
+        public long ReadyMs;
+        public string FolderName = "";
+        public DateTime DayHint = DateTime.Now;
+    }
+
+    private readonly ConcurrentQueue<StagedFile> _staged = new();
+    private readonly object _flushLock = new();
     /// <summary>
     /// 源路径 → 已成功处理时的 LastWriteTimeUtc.Ticks。
-    /// 同一写入版本不重复拷贝；源被重新写入（Ticks 变大）可再次处理并入队。
     /// </summary>
     private readonly ConcurrentDictionary<string, long> _handledWriteTicks = new(StringComparer.OrdinalIgnoreCase);
-    /// <summary>一级文件夹 → 最后活动时间 TickCount64</summary>
     private readonly ConcurrentDictionary<string, long> _folderTouch = new(StringComparer.OrdinalIgnoreCase);
-    /// <summary>正在整批处理的文件夹，防重入</summary>
     private readonly ConcurrentDictionary<string, byte> _folderBusy = new(StringComparer.OrdinalIgnoreCase);
     private readonly AutoResetEvent _signal = new(false);
     private CancellationTokenSource? _cts;
@@ -30,12 +42,18 @@ public sealed class ImageCopyWatcher : IDisposable
 
     public bool IsRunning => Volatile.Read(ref _running) == 1;
     public string? LastError { get; private set; }
+    public int StagedCount => _staged.Count;
 
-    public ImageCopyWatcher(AppLogger log, Func<AppConfig> cfg, Action<string, string, string>? onCopiedRenamedDmc = null)
+    public ImageCopyWatcher(
+        AppLogger log,
+        Func<AppConfig> cfg,
+        Action<string, string, string>? onCopiedRenamedDmc = null,
+        Func<bool>? canOutputToOut = null)
     {
         _log = log;
         _cfg = cfg;
         _onCopiedRenamedDmc = onCopiedRenamedDmc;
+        _canOutputToOut = canOutputToOut;
     }
 
     public void Start()
@@ -327,10 +345,42 @@ public sealed class ImageCopyWatcher : IDisposable
             return;
         }
 
-        // 3) 一次性全部拷到输出（同一日期目录）
-        // 用第一张源路径取日期夹；DateFolderFrom=Now 时都是今天
+        // 3) 拷到输出 或 暂存等 Waiting
+        var allowOut = _canOutputToOut?.Invoke() ?? true;
         var dayDir = GetOutputDayDirectory(cfg, readyFiles[0].path);
-        Directory.CreateDirectory(dayDir);
+        if (allowOut)
+            Directory.CreateDirectory(dayDir);
+
+        if (!allowOut)
+        {
+            _log.Info("图片",
+                $"整夹就绪但 HARAN 非 Waiting → 暂存改名，不进 Out | 文件夹={folderName} 张数={readyFiles.Count}");
+            foreach (var item in readyFiles)
+            {
+                try
+                {
+                    if (!File.Exists(item.path)) continue;
+                    if (IsSameWriteAlreadyHandled(item.path)) continue;
+                    var targetName = folderName + "_" + Path.GetFileName(item.path);
+                    _staged.Enqueue(new StagedFile
+                    {
+                        SourcePath = item.path,
+                        TargetFileName = targetName,
+                        Length = item.length,
+                        ReadyMs = item.readyMs,
+                        FolderName = folderName,
+                        DayHint = DateTime.Now
+                    });
+                    MarkHandled(item.path);
+                }
+                catch (Exception ex)
+                {
+                    _log.Error("图片", $"暂存失败 {item.path}: {ex.Message}");
+                }
+            }
+            _log.Success("图片", $"整夹已暂存 文件夹={folderName} 暂存队列={_staged.Count}（等 Waiting for Input 再输出）");
+            return;
+        }
 
         _log.Info("图片", $"整夹开始拷贝 文件夹={folderName} 张数={readyFiles.Count} → {dayDir}");
 
@@ -346,7 +396,6 @@ public sealed class ImageCopyWatcher : IDisposable
                 if (!File.Exists(path)) continue;
                 if (IsSameWriteAlreadyHandled(path)) continue;
 
-                // 再确认一次未被占用
                 if (!FileReady.IsUnlocked(path) || !FileReady.HasImageMagic(path))
                 {
                     _log.Skip("图片", $"拷贝前复查失败: {path}");
@@ -355,47 +404,13 @@ public sealed class ImageCopyWatcher : IDisposable
 
                 var targetName = folderName + "_" + Path.GetFileName(path);
                 var targetPath = Path.Combine(dayDir, targetName);
-                var skippedCopySameSize = false;
+                if (!TryCopyOne(cfg, path, item.length, item.readyMs, folderName, dayDir, targetName, out var outPath, out var stem))
+                    continue;
 
-                if (cfg.SkipIfSameSizeExists && File.Exists(targetPath))
-                {
-                    try
-                    {
-                        var dstLen = new FileInfo(targetPath).Length;
-                        if (dstLen == item.length)
-                        {
-                            // 输出已有同大小文件：不重复拷贝，但仍入 DMC 队列
-                            // （单张复测最常见：多张跑过后只再投 1 张旧名）
-                            skippedCopySameSize = true;
-                            _log.Skip("图片",
-                                $"同大小已存在，跳过拷贝仍入队 | {path} → {targetPath}");
-                        }
-                    }
-                    catch { /* fallthrough to unique name */ }
-
-                    if (!skippedCopySameSize)
-                        targetPath = GetUniqueTargetPath(dayDir, targetName);
-                }
-                else if (File.Exists(targetPath))
-                {
-                    targetPath = GetUniqueTargetPath(dayDir, targetName);
-                }
-
-                if (!skippedCopySameSize)
-                {
-                    File.Copy(path, targetPath, overwrite: false);
-                    _log.Success("图片",
-                        $"整夹拷贝成功 ready={item.readyMs}ms | {path} → {targetPath}");
-                }
-
-                MarkHandled(path);
                 okCount++;
-
-                var renamedStem = Path.GetFileNameWithoutExtension(targetPath);
-                dmcList.Add(renamedStem);
-
+                dmcList.Add(stem);
                 if (cfg.EnableCloudRelease && cfg.EnqueueFromImageCopyFolderName)
-                    _onCopiedRenamedDmc?.Invoke(renamedStem, targetPath, folderName);
+                    _onCopiedRenamedDmc?.Invoke(stem, outPath, folderName);
             }
             catch (Exception ex)
             {
@@ -407,6 +422,96 @@ public sealed class ImageCopyWatcher : IDisposable
             $"整夹完成 文件夹={folderName} 成功={okCount}/{readyFiles.Count} " +
             $"耗时={swAll.ElapsedMilliseconds}ms DMC数={dmcList.Count} " +
             (dmcList.Count > 0 ? ("[" + string.Join(", ", dmcList) + "]") : ""));
+    }
+
+    /// <summary>HARAN 进入 Waiting 时调用：把暂存改名图写入 OutputRoot 并入 DMC。</summary>
+    public int FlushStagedToOutput()
+    {
+        lock (_flushLock)
+        {
+            var cfg = _cfg();
+            var n = 0;
+            var list = new List<StagedFile>();
+            while (_staged.TryDequeue(out var s))
+                list.Add(s);
+            if (list.Count == 0) return 0;
+
+            _log.Info("图片", $"Waiting 触发：开始输出暂存图 数量={list.Count}");
+            foreach (var item in list)
+            {
+                try
+                {
+                    if (!File.Exists(item.SourcePath))
+                    {
+                        _log.Skip("图片", $"暂存源已不存在: {item.SourcePath}");
+                        continue;
+                    }
+                    var dayDir = GetOutputDayDirectory(cfg, item.SourcePath);
+                    Directory.CreateDirectory(dayDir);
+                    if (!TryCopyOne(cfg, item.SourcePath, item.Length, item.ReadyMs, item.FolderName, dayDir,
+                            item.TargetFileName, out var outPath, out var stem, alreadyMarked: true))
+                        continue;
+                    n++;
+                    if (cfg.EnableCloudRelease && cfg.EnqueueFromImageCopyFolderName)
+                        _onCopiedRenamedDmc?.Invoke(stem, outPath, item.FolderName);
+                }
+                catch (Exception ex)
+                {
+                    _log.Error("图片", $"暂存输出失败 {item.SourcePath}: {ex.Message}");
+                }
+            }
+            _log.Success("图片", $"暂存输出完成 成功={n}/{list.Count}");
+            return n;
+        }
+    }
+
+    private bool TryCopyOne(
+        AppConfig cfg,
+        string path,
+        long length,
+        long readyMs,
+        string folderName,
+        string dayDir,
+        string targetName,
+        out string targetPath,
+        out string renamedStem,
+        bool alreadyMarked = false)
+    {
+        targetPath = Path.Combine(dayDir, targetName);
+        renamedStem = Path.GetFileNameWithoutExtension(targetName);
+        var skippedCopySameSize = false;
+
+        if (cfg.SkipIfSameSizeExists && File.Exists(targetPath))
+        {
+            try
+            {
+                var dstLen = new FileInfo(targetPath).Length;
+                if (dstLen == length)
+                {
+                    skippedCopySameSize = true;
+                    _log.Skip("图片", $"同大小已存在，跳过拷贝仍入队 | {path} → {targetPath}");
+                }
+            }
+            catch { /* */ }
+
+            if (!skippedCopySameSize)
+                targetPath = GetUniqueTargetPath(dayDir, targetName);
+        }
+        else if (File.Exists(targetPath))
+        {
+            targetPath = GetUniqueTargetPath(dayDir, targetName);
+        }
+
+        if (!skippedCopySameSize)
+        {
+            File.Copy(path, targetPath, overwrite: false);
+            _log.Success("图片", $"拷贝成功 ready={readyMs}ms | {path} → {targetPath}");
+        }
+
+        if (!alreadyMarked)
+            MarkHandled(path);
+        renamedStem = Path.GetFileNameWithoutExtension(targetPath);
+        return true;
     }
 
     private bool IsSessionFreshFile(string path)

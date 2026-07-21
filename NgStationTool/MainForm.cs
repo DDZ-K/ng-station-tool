@@ -10,6 +10,7 @@ public sealed class MainForm : Form
     private readonly KeyboardService _keyboard;
     private readonly ImageCopyWatcher _imageWatcher;
     private readonly CloudReleaseService _cloud;
+    private readonly HaranUiMatchService _haran;
     private readonly System.Windows.Forms.Timer _uiTimer;
 
     private readonly Label _lblStatus;
@@ -27,18 +28,44 @@ public sealed class MainForm : Form
     public MainForm()
     {
         _cfg = AppConfig.Load();
+        if (string.IsNullOrWhiteSpace(_cfg.HaranTemplateRoot))
+            _cfg.HaranTemplateRoot = _cfg.ResolvedHaranTemplateRoot();
         var logPath = Path.Combine(AppContext.BaseDirectory, "station_log.txt");
         _log = new AppLogger(logPath, _cfg.MaxLogLines);
         _cache = new DmcPendingCache(_log, _cfg.PendingTimeoutSec);
         _keyboard = new KeyboardService(_log);
-        _cloud = new CloudReleaseService(_log, () => _cfg, _cache, _keyboard);
-        _imageWatcher = new ImageCopyWatcher(_log, () => _cfg, (renamedDmc, path, folderKey) =>
+        _haran = new HaranUiMatchService(_log, () => _cfg);
+        _cloud = new CloudReleaseService(_log, () => _cfg, _cache, _keyboard, () =>
         {
-            if (_cfg.EnableCloudRelease && _cfg.EnqueueFromImageCopyFolderName)
-                _cloud.EnqueueDmc(renamedDmc, "ImageCopyRenamed", path, folderKey);
+            if (!_cfg.EnableHaranUiGate || !_cfg.HaranGateKeys) return true;
+            return _haran.IsWaiting;
         });
+        _imageWatcher = new ImageCopyWatcher(_log, () => _cfg,
+            (renamedDmc, path, folderKey) =>
+            {
+                if (_cfg.EnableCloudRelease && _cfg.EnqueueFromImageCopyFolderName)
+                    _cloud.EnqueueDmc(renamedDmc, "ImageCopyRenamed", path, folderKey);
+            },
+            canOutputToOut: () =>
+            {
+                if (!_cfg.EnableHaranUiGate) return true;
+                return _haran.IsWaiting;
+            });
+        _haran.EnteredWaiting += () =>
+        {
+            try
+            {
+                var n = _imageWatcher.FlushStagedToOutput();
+                if (n > 0)
+                    _log.Success("HARAN", $"Waiting：已输出暂存图 {n} 张到 Out");
+            }
+            catch (Exception ex)
+            {
+                _log.Error("HARAN", "Flush 暂存失败: " + ex.Message);
+            }
+        };
 
-        Text = "工位工具 · 图片命名 + 云端放行  v1.2.5";
+        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.0";
         Width = 980;
         Height = 640;
         StartPosition = FormStartPosition.CenterScreen;
@@ -176,7 +203,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Load += (_, _) =>
         {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.2.5 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
+            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.0 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
             if (_cfg.AutoStartOnLaunch)
                 StartAll();
             else
@@ -189,8 +216,11 @@ public sealed class MainForm : Form
         try
         {
             _cfg = AppConfig.Load(); // 重新读盘
+            if (string.IsNullOrWhiteSpace(_cfg.HaranTemplateRoot))
+                _cfg.HaranTemplateRoot = _cfg.ResolvedHaranTemplateRoot();
             _cache.SetTimeoutSec(_cfg.PendingTimeoutSec);
             _log.SetMaxLines(_cfg.MaxLogLines);
+            _haran.Start();
             _imageWatcher.Start();
             _cloud.Start();
             _btnStart.Enabled = false;
@@ -207,6 +237,7 @@ public sealed class MainForm : Form
     {
         _imageWatcher.Stop();
         _cloud.Stop();
+        _haran.Stop();
         _btnStart.Enabled = true;
         _btnStop.Enabled = false;
         UpdateStatus();
@@ -297,8 +328,14 @@ public sealed class MainForm : Form
     {
         var img = _imageWatcher.IsRunning ? "图片✓" : "图片✗";
         var cloud = _cloud.IsRunning ? "放行✓" : "放行✗";
-        var run = _imageWatcher.IsRunning || _cloud.IsRunning ? "运行中" : "已停止";
-        _lblStatus.Text = $"状态: {run}  |  {img}  {cloud}  |  缓存 {_cache.Count}  |  OK键={_cfg.OkKey} NOK键={_cfg.NokKey} 超时={_cfg.PendingTimeoutSec}s";
+        var haran = !_cfg.EnableHaranUiGate
+            ? "HARAN门闩关"
+            : (_haran.IsRunning
+                ? $"HARAN={_haran.LastKind} 暂存={_imageWatcher.StagedCount}"
+                : "HARAN✗");
+        var run = _imageWatcher.IsRunning || _cloud.IsRunning || _haran.IsRunning ? "运行中" : "已停止";
+        _lblStatus.Text =
+            $"状态: {run}  |  {img}  {cloud}  {haran}  |  缓存 {_cache.Count}  |  OK={_cfg.OkKey} NOK={_cfg.NokKey} 超时={_cfg.PendingTimeoutSec}s";
         _lblStatus.BackColor = run == "运行中" ? Color.FromArgb(20, 90, 50) : Color.FromArgb(32, 40, 48);
     }
 
@@ -337,6 +374,7 @@ public sealed class MainForm : Form
         try { StopAll(); } catch { /* ignore */ }
         try { _imageWatcher.Dispose(); } catch { /* ignore */ }
         try { _cloud.Dispose(); } catch { /* ignore */ }
+        try { _haran.Dispose(); } catch { /* ignore */ }
         try { _tray.Visible = false; _tray.Dispose(); } catch { /* ignore */ }
     }
 }

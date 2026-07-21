@@ -55,12 +55,27 @@ public sealed class ConfigForm : Form
     private readonly NumericUpDown _uiRefresh;
     private readonly NumericUpDown _maxLogLines;
 
+    // HARAN 门闩
+    private readonly CheckBox _enableHaran;
+    private readonly CheckBox _haranGateKeys;
+    private readonly TextBox _haranFilter;
+    private readonly TextBox _haranTplRoot;
+    private readonly NumericUpDown _haranPoll;
+    private readonly NumericUpDown _haranScore;
+    private readonly NumericUpDown _haranStable;
+    private readonly CheckBox _haranFromBottom;
+    private readonly NumericUpDown _haranBottomOff;
+    private readonly NumericUpDown _haranLeft;
+    private readonly NumericUpDown _haranTop;
+    private readonly NumericUpDown _haranW;
+    private readonly NumericUpDown _haranH;
+
     public ConfigForm(AppConfig cfg)
     {
         Result = cfg;
-        Text = "配置 · 图片命名 / 云端放行 / 时序";
-        Width = 760;
-        Height = 620;
+        Text = "配置 · 图片 / 云端 / 时序 / HARAN门闩";
+        Width = 780;
+        Height = 640;
         StartPosition = FormStartPosition.CenterParent;
         Font = new Font("Microsoft YaHei UI", 9F);
         MinimizeBox = false;
@@ -72,20 +87,23 @@ public sealed class ConfigForm : Form
         var tabImage = new TabPage("② 图片命名");
         var tabCloud = new TabPage("③ 云端 log 放行");
         var tabTime = new TabPage("④ 时序参数");
-        tabs.TabPages.AddRange(new[] { tabCommon, tabImage, tabCloud, tabTime });
+        var tabHaran = new TabPage("⑤ HARAN界面就绪");
+        tabs.TabPages.AddRange(new[] { tabCommon, tabImage, tabCloud, tabTime, tabHaran });
 
         // ----- 通用 -----
         var p0 = MakeScroll();
         var y = 12;
-        AddHeader(p0, ref y, "模块总开关（两个功能可独立开/关）");
-        _enableCopy = AddCheck(p0, ref y, "启用【图片命名】：监视 WatchRoot，整夹静默后一次性改名复制到 OutputRoot", cfg.EnableImageCopy);
-        _enableCloud = AddCheck(p0, ref y, "启用【云端 log 放行】：DMC 缓存 + 读 log + 小键盘 9/7", cfg.EnableCloudRelease);
+        AddHeader(p0, ref y, "模块总开关（可独立开/关）");
+        _enableCopy = AddCheck(p0, ref y, "启用【图片命名】：监视 WatchRoot，整夹静默后改名（门闩开时先暂存）", cfg.EnableImageCopy);
+        _enableCloud = AddCheck(p0, ref y, "启用【云端 log 放行】：DMC 缓存 + 读 log + 按键", cfg.EnableCloudRelease);
+        _enableHaran = AddCheck(p0, ref y, "启用【HARAN 界面就绪门闩】：匹配 Waiting 后才进 Out（见⑤）", cfg.EnableHaranUiGate);
         _autoStart = AddCheck(p0, ref y, "启动程序后自动点「开始」", cfg.AutoStartOnLaunch);
         AddNote(p0, ref y,
-            "说明：\n" +
-            "· 图片命名：只负责监控→改名复制→（可选）把改名完整名写入 DMC 缓存\n" +
-            "· 云端放行：监视 log 目录，文件名包含缓存中的 DMC 且内容 OK/NOK 时按键\n" +
-            "· 修改监视目录后需「停止」再「开始」才生效");
+            "门闩开启时流程：\n" +
+            "· 图片就绪 → 改名暂存（不进 Out、不入 DMC）\n" +
+            "· HARAN 匹配到 Waiting for Input → 输出到 Out 并入 DMC\n" +
+            "· 云端 log → 按键（可配置是否也要求 Waiting）\n" +
+            "· 模板请用 HaranUiProbe v2.1 录到模板目录 idle/ waiting/");
         tabCommon.Controls.Add(p0);
 
         // ----- 图片命名 -----
@@ -204,6 +222,42 @@ public sealed class ConfigForm : Form
             "· 云端慢：加大 PendingTimeoutSec\n" +
             "· log 半截写入：加大 LogReadyBudgetMs");
         tabTime.Controls.Add(p3);
+
+        // ----- HARAN 界面就绪 -----
+        var p4 = MakeScroll();
+        y = 12;
+        AddHeader(p4, ref y, "开关（与①通用中的门闩开关联动保存）");
+        _haranGateKeys = AddCheck(p4, ref y, "按键也要求 Waiting（建议开：非 Waiting 不模拟 9/7/回车）", cfg.HaranGateKeys);
+        AddHeader(p4, ref y, "窗口与模板");
+        AddLabel(p4, ref y, "窗口标题过滤（分号分隔，命中任一）");
+        _haranFilter = AddTb(p4, ref y, cfg.HaranWindowTitleFilter);
+        AddLabel(p4, ref y, "模板根目录（下含 idle\\*.png 与 waiting\\*.png，可用 HaranUiProbe 录制）");
+        var tpl = string.IsNullOrWhiteSpace(cfg.HaranTemplateRoot) ? cfg.ResolvedHaranTemplateRoot() : cfg.HaranTemplateRoot;
+        _haranTplRoot = AddTb(p4, ref y, tpl);
+        AddHeader(p4, ref y, "轮询 / 匹配");
+        AddLabel(p4, ref y, "轮询间隔 HaranPollMs（建议 250～300）");
+        _haranPoll = AddNum(p4, ref y, cfg.HaranPollMs, 100, 5000);
+        AddLabel(p4, ref y, "相似度阈值 HaranMinScore ×100（例如 86 = 0.86）");
+        _haranScore = AddNum(p4, ref y, (decimal)(cfg.HaranMinScore * 100), 50, 99);
+        AddLabel(p4, ref y, "稳定帧数（连续 N 次一致才切换状态，防闪）");
+        _haranStable = AddNum(p4, ref y, cfg.HaranStableFrames, 1, 10);
+        AddHeader(p4, ref y, "截取区域 ROI（相对 HARAN 窗口）");
+        _haranFromBottom = AddCheck(p4, ref y, "从窗口底边向上截取（推荐）", cfg.HaranRoiFromBottom);
+        AddLabel(p4, ref y, "底边上移像素 BottomOffset");
+        _haranBottomOff = AddNum(p4, ref y, cfg.HaranRoiBottomOffset, 0, 400);
+        AddLabel(p4, ref y, "左边距 Left");
+        _haranLeft = AddNum(p4, ref y, cfg.HaranRoiLeft, 0, 4000);
+        AddLabel(p4, ref y, "顶边距 Top（仅关闭「从底边」时有效）");
+        _haranTop = AddNum(p4, ref y, cfg.HaranRoiTop, 0, 4000);
+        AddLabel(p4, ref y, "宽度 Width（0=铺满到右边）");
+        _haranW = AddNum(p4, ref y, cfg.HaranRoiWidth, 0, 4000);
+        AddLabel(p4, ref y, "高度 Height（状态栏建议 40～60）");
+        _haranH = AddNum(p4, ref y, cfg.HaranRoiHeight, 8, 800);
+        AddNote(p4, ref y,
+            "模板：用 HaranUiProbe v2.1 框选同样区域，空闲多存几张（含 archiving），待判存 Waiting。\n" +
+            "把 probe 的 templates\\idle 与 waiting 拷到本页「模板根目录」下即可。\n" +
+            "改 ROI/模板后请停止再开始。");
+        tabHaran.Controls.Add(p4);
 
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 52 };
         var btnOk = new Button { Text = "保存", Width = 100, Height = 32, Left = 520, Top = 10 };
@@ -373,6 +427,23 @@ public sealed class ConfigForm : Form
         src.ActivateWindowDelayMs = (int)_activateDelay.Value;
         src.UiRefreshMs = (int)_uiRefresh.Value;
         src.MaxLogLines = (int)_maxLogLines.Value;
+
+        // HARAN
+        src.EnableHaranUiGate = _enableHaran.Checked;
+        src.HaranGateKeys = _haranGateKeys.Checked;
+        src.HaranWindowTitleFilter = _haranFilter.Text.Trim();
+        src.HaranTemplateRoot = _haranTplRoot.Text.Trim();
+        if (string.IsNullOrWhiteSpace(src.HaranTemplateRoot))
+            src.HaranTemplateRoot = src.ResolvedHaranTemplateRoot();
+        src.HaranPollMs = (int)_haranPoll.Value;
+        src.HaranMinScore = (double)_haranScore.Value / 100.0;
+        src.HaranStableFrames = (int)_haranStable.Value;
+        src.HaranRoiFromBottom = _haranFromBottom.Checked;
+        src.HaranRoiBottomOffset = (int)_haranBottomOff.Value;
+        src.HaranRoiLeft = (int)_haranLeft.Value;
+        src.HaranRoiTop = (int)_haranTop.Value;
+        src.HaranRoiWidth = (int)_haranW.Value;
+        src.HaranRoiHeight = (int)_haranH.Value;
 
         return src;
     }
