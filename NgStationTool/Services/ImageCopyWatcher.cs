@@ -345,16 +345,12 @@ public sealed class ImageCopyWatcher : IDisposable
             return;
         }
 
-        // 3) 拷到输出 或 暂存等 Waiting
-        var allowOut = _canOutputToOut?.Invoke() ?? true;
-        var dayDir = GetOutputDayDirectory(cfg, readyFiles[0].path);
-        if (allowOut)
-            Directory.CreateDirectory(dayDir);
-
-        if (!allowOut)
+        // 3) 门闩开：一律先暂存改名，再按 Waiting 输出；门闩关：直接出 Out
+        var cfgGate = cfg.EnableHaranUiGate;
+        if (cfgGate)
         {
             _log.Info("图片",
-                $"整夹就绪但 HARAN 非 Waiting → 暂存改名，不进 Out | 文件夹={folderName} 张数={readyFiles.Count}");
+                $"整夹就绪 → 先暂存改名（门闩）| 文件夹={folderName} 张数={readyFiles.Count}");
             foreach (var item in readyFiles)
             {
                 try
@@ -378,9 +374,24 @@ public sealed class ImageCopyWatcher : IDisposable
                     _log.Error("图片", $"暂存失败 {item.path}: {ex.Message}");
                 }
             }
-            _log.Success("图片", $"整夹已暂存 文件夹={folderName} 暂存队列={_staged.Count}（等 Waiting for Input 再输出）");
+            _log.Success("图片", $"整夹已暂存 文件夹={folderName} 暂存队列={_staged.Count}");
+
+            // 若当前已是 Waiting：马上输出（多图也走同一条路径）
+            var waitingNow = _canOutputToOut?.Invoke() ?? false;
+            if (waitingNow)
+            {
+                _log.Info("图片", "当前已是 Waiting → 立即输出本批暂存");
+                FlushStagedToOutput();
+            }
+            else
+            {
+                _log.Info("图片", "当前非 Waiting → 等待界面匹配到 Waiting for Input 再输出");
+            }
             return;
         }
+
+        var dayDir = GetOutputDayDirectory(cfg, readyFiles[0].path);
+        Directory.CreateDirectory(dayDir);
 
         _log.Info("图片", $"整夹开始拷贝 文件夹={folderName} 张数={readyFiles.Count} → {dayDir}");
 
@@ -403,7 +414,6 @@ public sealed class ImageCopyWatcher : IDisposable
                 }
 
                 var targetName = folderName + "_" + Path.GetFileName(path);
-                var targetPath = Path.Combine(dayDir, targetName);
                 if (!TryCopyOne(cfg, path, item.length, item.readyMs, folderName, dayDir, targetName, out var outPath, out var stem))
                     continue;
 

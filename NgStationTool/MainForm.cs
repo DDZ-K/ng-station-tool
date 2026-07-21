@@ -65,7 +65,7 @@ public sealed class MainForm : Form
             }
         };
 
-        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.0";
+        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.1";
         Width = 980;
         Height = 640;
         StartPosition = FormStartPosition.CenterScreen;
@@ -203,7 +203,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Load += (_, _) =>
         {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.0 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
+            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.1 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
             if (_cfg.AutoStartOnLaunch)
                 StartAll();
             else
