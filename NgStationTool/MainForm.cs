@@ -69,48 +69,91 @@ public sealed class MainForm : Form
         imgRef = _imageWatcher;
 
         void TryFlushBySession(string reason)
-        {
-            try
-            {
-                if (_imageWatcher.StagedCount <= 0 && !_session.HasActiveSession) return;
-
-                if (!_cfg.HaranSerialSessions)
                 {
-                    var all = _imageWatcher.FlushStagedToOutput(null);
-                    if (all > 0)
-                        _log.Success("HARAN", $"{reason}：输出暂存 {all} 张（非串行）");
-                    return;
+                    try
+                    {
+                        if (_imageWatcher.StagedCount <= 0 && !_session.HasActiveSession) return;
+
+                        if (!_cfg.HaranSerialSessions)
+                        {
+                            var all = _imageWatcher.FlushStagedToOutput(null);
+                            if (all > 0)
+                                _log.Success("HARAN", $"{reason}：输出暂存 {all} 张（非串行）");
+                            else if (_imageWatcher.StagedCount > 0)
+                                _log.Warn("HARAN", $"{reason}：非串行 Flush=0 但暂存仍={_imageWatcher.StagedCount}");
+                            return;
+                        }
+
+                        // 空会话清理：活动组无暂存且无 DMC 时释放
+                                        var act = _session.ActiveFolder;
+                                        if (!string.IsNullOrEmpty(act)
+                                            && !_imageWatcher.HasStagedFolder(act)
+                                            && _cache.CountInFolder(act) == 0)
+                                        {
+                                            _session.TryReleaseOrphanSession(activeFolderStillStaged: null, pendingInActiveFolder: 0);
+                                        }
+
+                                        if (!_session.TryGetFolderToFlush(_imageWatcher.PeekFirstStagedFolder, out var folder, out var block))
+                                        {
+                                            if (_imageWatcher.StagedCount > 0 && !string.IsNullOrEmpty(block))
+                                                _session.LogBlockedThrottled(block!, _imageWatcher.StagedCount);
+                                            return;
+                                        }
+
+                                        var n = _imageWatcher.FlushStagedToOutput(folder);
+                                        if (n > 0)
+                                        {
+                                            _log.Success("HARAN",
+                                                $"{reason}：会话组={folder} 输出 {n} 张 | {_session.Describe()}");
+                                        }
+                                        else if (_imageWatcher.StagedCount > 0)
+                                        {
+                                            _log.Warn("HARAN",
+                                                $"{reason}：Flush=0 会话组={folder ?? "-"} 剩余暂存={_imageWatcher.StagedCount} | {_session.Describe()}");
+                                            // 活动组缓存已空且暂存也无该组 → 释放后重试下一组
+                                            if (!string.IsNullOrEmpty(folder)
+                                                && _cache.CountInFolder(folder) == 0
+                                                && !_imageWatcher.HasStagedFolder(folder))
+                                            {
+                                                _session.TryReleaseOrphanSession(null, 0);
+                                                if (_session.TryGetFolderToFlush(_imageWatcher.PeekFirstStagedFolder, out var folder2, out _))
+                                                {
+                                                    var n2 = _imageWatcher.FlushStagedToOutput(folder2);
+                                                    if (n2 > 0)
+                                                        _log.Success("HARAN",
+                                                            $"{reason}：重试会话组={folder2} 输出 {n2} 张");
+                                                }
+                                            }
+                                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error("HARAN", $"{reason} Flush 失败: " + ex.Message);
+                    }
                 }
 
-                if (!_session.TryGetFolderToFlush(_imageWatcher.PeekFirstStagedFolder, out var folder))
-                    return;
-
-                // folder null + serial off already handled; serial true always returns folder name when ok
-                var n = _imageWatcher.FlushStagedToOutput(folder);
-                if (n > 0)
-                    _log.Success("HARAN",
-                        $"{reason}：会话组={folder} 输出 {n} 张 | {_session.Describe()}");
-            }
-            catch (Exception ex)
-            {
-                _log.Error("HARAN", $"{reason} Flush 失败: " + ex.Message);
-            }
-        }
-
-        _haran.EnteredWaiting += () => TryFlushBySession("进入Waiting");
-        _haran.StillWaiting += () => TryFlushBySession("Waiting持续");
-        _haran.StateChanged += kind =>
-        {
-            try { _session.OnHaranMatchKind(kind); }
-            catch (Exception ex) { _log.Warn("会话", "状态回调: " + ex.Message); }
-        };
+                _haran.EnteredWaiting += () => TryFlushBySession("进入Waiting");
+                _haran.StillWaiting += () => TryFlushBySession("Waiting持续");
+                _imageWatcher.StagedBatchReady += (folder, count) =>
+                {
+                    _log.Info("HARAN", $"收到暂存完成通知 组={folder} 张数={count} → 立即尝试输出");
+                    TryFlushBySession("暂存完成");
+                };
+                _haran.StateChanged += kind =>
+                {
+                    try { _session.OnHaranMatchKind(kind); }
+                    catch (Exception ex) { _log.Warn("会话", "状态回调: " + ex.Message); }
+                    // 离开 Waiting 后若有暂存，冷却结束后由持续轮询/下次 Waiting 再 Flush
+                    if (kind != HaranUiMatchService.MatchKind.Waiting)
+                        TryFlushBySession("界面非Waiting");
+                };
         _cloud.FolderGroupFinished += (fk, reason) =>
         {
             try { _session.NotifyFolderGroupFinished(fk, reason, uiStillWaiting: _haran.IsWaiting); }
             catch (Exception ex) { _log.Warn("会话", "组结束回调: " + ex.Message); }
         };
 
-        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.5";
+        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.7";
         Width = 980;
         Height = 640;
         StartPosition = FormStartPosition.CenterScreen;
@@ -248,7 +291,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Load += (_, _) =>
         {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.5 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
+            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.7 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
             if (_cfg.AutoStartOnLaunch)
                 StartAll();
             else

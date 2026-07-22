@@ -14,6 +14,8 @@ public sealed class JudgmentSessionCoordinator
     /// <summary>当前组判定流程已结束，等界面离开 Waiting。</summary>
     private bool _awaitLeaveWaiting;
     private long _cooldownUntilTick;
+    private long _awaitLeaveSinceTick;
+    private long _lastBlockLogTick;
 
     public JudgmentSessionCoordinator(AppLogger log, Func<AppConfig> cfg)
     {
@@ -38,16 +40,35 @@ public sealed class JudgmentSessionCoordinator
             _activeFolder = null;
             _awaitLeaveWaiting = false;
             _cooldownUntilTick = 0;
+            _awaitLeaveSinceTick = 0;
+        }
+    }
+
+    /// <summary>阻塞原因（空=不阻塞）。</summary>
+    public string? BlockReason
+    {
+        get
+        {
+            lock (_lock)
+            {
+                var now = Environment.TickCount64;
+                if (now < _cooldownUntilTick)
+                    return $"冷却中剩余{_cooldownUntilTick - now}ms";
+                if (_awaitLeaveWaiting)
+                    return $"等离开Waiting 组={_activeFolder}";
+                return null;
+            }
         }
     }
 
     /// <summary>
-    /// Waiting 轮询时：是否允许 Flush；串行时返回应输出的文件夹名。
-    /// 非串行：folder=null 且 return true → 调用方 Flush 全部。
+    /// Waiting / 暂存就绪时：是否允许 Flush；串行时返回应输出的文件夹名。
+    /// 注意：peek 在锁外调用，避免与 ImageCopyWatcher 锁交叉死锁。
     /// </summary>
-    public bool TryGetFolderToFlush(Func<string?> peekFirstStagedFolder, out string? folder)
+    public bool TryGetFolderToFlush(Func<string?> peekFirstStagedFolder, out string? folder, out string? blockReason)
     {
         folder = null;
+        blockReason = null;
         var cfg = _cfg();
         if (!cfg.EnableHaranUiGate || !cfg.HaranSerialSessions)
         {
@@ -55,27 +76,58 @@ public sealed class JudgmentSessionCoordinator
             return true;
         }
 
+        // 锁外 peek，避免 session锁 + flush锁 嵌套
+        string? peeked;
+        try { peeked = peekFirstStagedFolder(); }
+        catch (Exception ex)
+        {
+            blockReason = "peek暂存失败:" + ex.Message;
+            return false;
+        }
+
         lock (_lock)
         {
             var now = Environment.TickCount64;
-            if (now < _cooldownUntilTick)
-                return false;
 
-            // 组已判完，必须等离开 Waiting 后再开新组（期间也不再 Flush 其它组）
+            // 等离开 Waiting 超时兜底：界面若一直 Waiting（产线常连续 Waiting），超时后仍允许下一组
             if (_awaitLeaveWaiting)
+            {
+                var maxWait = Math.Max(0, cfg.HaranLeaveWaitTimeoutMs);
+                if (maxWait > 0 && _awaitLeaveSinceTick > 0 && now - _awaitLeaveSinceTick >= maxWait)
+                {
+                    _log.Warn("会话",
+                        $"等离开Waiting 超时 {maxWait}ms → 强制结束会话并进入冷却（界面可能连续 Waiting）");
+                    ApplyLeaveWaitingLocked("等离开超时兜底");
+                }
+            }
+
+            now = Environment.TickCount64;
+            if (now < _cooldownUntilTick)
+            {
+                blockReason = $"冷却中剩余{_cooldownUntilTick - now}ms";
                 return false;
+            }
+
+            if (_awaitLeaveWaiting)
+            {
+                blockReason = $"等离开Waiting 组={_activeFolder}";
+                return false;
+            }
 
             if (!string.IsNullOrEmpty(_activeFolder))
             {
+                // 活动会话：只 Flush 该组；若暂存里已没有该组、但有其它组，且调用方会处理 0 输出
                 folder = _activeFolder;
                 return true;
             }
 
-            var next = peekFirstStagedFolder();
-            if (string.IsNullOrWhiteSpace(next))
+            if (string.IsNullOrWhiteSpace(peeked))
+            {
+                blockReason = "暂存为空或无文件夹名";
                 return false;
+            }
 
-            _activeFolder = next.Trim();
+            _activeFolder = peeked.Trim();
             _awaitLeaveWaiting = false;
             folder = _activeFolder;
             _log.Info("会话",
@@ -84,7 +136,7 @@ public sealed class JudgmentSessionCoordinator
         }
     }
 
-    /// <summary>整组结束（已回车 / 超时不回车）。uiStillWaiting=界面是否仍匹配 Waiting。</summary>
+    /// <summary>整组结束（已回车 / 超时不回车）。</summary>
     public void NotifyFolderGroupFinished(string folderKey, string reason, bool uiStillWaiting)
     {
         folderKey = (folderKey ?? "").Trim();
@@ -103,16 +155,16 @@ public sealed class JudgmentSessionCoordinator
             }
 
             _awaitLeaveWaiting = true;
+            _awaitLeaveSinceTick = Environment.TickCount64;
             _log.Info("会话",
                 $"当前组判定流程结束 组={folderKey} 原因={reason} → 等待界面离开 Waiting");
 
-            // 若此时已不在 Waiting（回车后界面已变），立即进入延迟
             if (!uiStillWaiting)
                 ApplyLeaveWaitingLocked("组结束时已非Waiting");
         }
     }
 
-    /// <summary>仅在「等离开 Waiting」阶段处理非 Waiting；判定中途闪断不拆会话。</summary>
+    /// <summary>仅在「等离开 Waiting」阶段处理非 Waiting。</summary>
     public void OnHaranMatchKind(HaranUiMatchService.MatchKind kind)
     {
         var cfg = _cfg();
@@ -129,6 +181,28 @@ public sealed class JudgmentSessionCoordinator
         }
     }
 
+    /// <summary>活动会话下：若该组已无待判 DMC、暂存也无该组，可释放会话接下组。</summary>
+    public void TryReleaseOrphanSession(string? activeFolderStillStaged, int pendingInActiveFolder)
+    {
+        lock (_lock)
+        {
+            if (string.IsNullOrEmpty(_activeFolder) || _awaitLeaveWaiting)
+                return;
+            // 暂存还有本组 → 不释放
+            if (!string.IsNullOrEmpty(activeFolderStillStaged)
+                && string.Equals(activeFolderStillStaged, _activeFolder, StringComparison.OrdinalIgnoreCase))
+                return;
+            if (pendingInActiveFolder > 0)
+                return;
+
+            // 活动会话组既无暂存也无缓存 → 空会话，直接清掉以便接下组
+            _log.Warn("会话",
+                $"空会话释放 组={_activeFolder}（无暂存且无待判DMC）");
+            _activeFolder = null;
+            _awaitLeaveWaiting = false;
+        }
+    }
+
     private void ApplyLeaveWaitingLocked(string why)
     {
         var delay = Math.Max(0, _cfg().HaranNextSessionDelayMs);
@@ -136,8 +210,17 @@ public sealed class JudgmentSessionCoordinator
         var prev = _activeFolder;
         _activeFolder = null;
         _awaitLeaveWaiting = false;
+        _awaitLeaveSinceTick = 0;
         _log.Info("会话",
             $"离开 Waiting（{why}）→ 清空会话 原组={prev ?? "-"}，{delay}ms 后可开下一组");
+    }
+
+    public void LogBlockedThrottled(string reason, int stagedCount)
+    {
+        var t = Environment.TickCount64;
+        if (t - _lastBlockLogTick < 3000) return;
+        _lastBlockLogTick = t;
+        _log.Warn("会话", $"暂存={stagedCount} 暂不能输出：{reason} | {Describe()}");
     }
 
     public string Describe()

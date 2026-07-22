@@ -44,6 +44,9 @@ public sealed class ImageCopyWatcher : IDisposable
     public string? LastError { get; private set; }
     public int StagedCount => _staged.Count;
 
+    /// <summary>整夹已改名入暂存后触发（用于立刻尝试 Waiting Flush，不单靠轮询上升沿）。</summary>
+    public event Action<string, int>? StagedBatchReady;
+
     public ImageCopyWatcher(
         AppLogger log,
         Func<AppConfig> cfg,
@@ -376,11 +379,14 @@ public sealed class ImageCopyWatcher : IDisposable
             }
             _log.Success("图片", $"整夹已暂存 文件夹={folderName} 暂存队列={_staged.Count}");
 
-            // 若当前已是 Waiting：不在此处整批冲刷（避免双片重叠时两组合流）；
-            // 由 HARAN 轮询 + 会话协调器按「当前组」Flush。
+            try { StagedBatchReady?.Invoke(folderName, readyFiles.Count); }
+            catch (Exception ex) { _log.Warn("图片", "StagedBatchReady 回调: " + ex.Message); }
+
+            // 若当前已是 Waiting：不在此处直接 Flush（会话串行由协调器处理）；
+            // 但会通过 StagedBatchReady 立刻触发协调器，避免只等下一轮轮询。
             var waitingNow = _canOutputToOut?.Invoke() ?? false;
             if (waitingNow)
-                _log.Info("图片", "当前已是 Waiting → 暂存已入队，由会话协调器按当前组输出");
+                _log.Info("图片", "当前已是 Waiting → 暂存已入队，已通知会话协调器尝试输出");
             else
                 _log.Info("图片", "当前非 Waiting → 等待界面匹配到 Waiting for Input 再输出");
             return;
@@ -506,6 +512,22 @@ public sealed class ImageCopyWatcher : IDisposable
             foreach (var s in list)
                 _staged.Enqueue(s);
             return list.Select(x => x.FolderName).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+        }
+    }
+
+    /// <summary>暂存中是否仍有指定文件夹组。</summary>
+    public bool HasStagedFolder(string folderName)
+    {
+        folderName = (folderName ?? "").Trim();
+        if (folderName.Length == 0) return false;
+        lock (_flushLock)
+        {
+            var list = new List<StagedFile>();
+            while (_staged.TryDequeue(out var s))
+                list.Add(s);
+            foreach (var s in list)
+                _staged.Enqueue(s);
+            return list.Any(x => string.Equals(x.FolderName, folderName, StringComparison.OrdinalIgnoreCase));
         }
     }
 

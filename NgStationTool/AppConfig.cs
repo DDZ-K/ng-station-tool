@@ -102,6 +102,11 @@ public sealed class AppConfig
     public bool HaranSerialSessions { get; set; } = true;
     /// <summary>离开 Waiting 后，再过多久才允许下一组会话（ms）。</summary>
     public int HaranNextSessionDelayMs { get; set; } = 500;
+    /// <summary>
+    /// 组结束后等界面离开 Waiting 的最长等待（ms）。0=一直等离开；
+    /// 产线若连续 Waiting 不闪断，建议 3000～10000 作兜底，避免下一组暂存永久卡死。
+    /// </summary>
+    public int HaranLeaveWaitTimeoutMs { get; set; } = 5000;
 
     public string ResolvedHaranTemplateRoot()
     {

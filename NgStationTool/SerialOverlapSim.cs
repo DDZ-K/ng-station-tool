@@ -74,7 +74,7 @@ internal static class SerialOverlapSim
             Console.WriteLine($"[1] 组A 已暂存 5 张，Staged={img.StagedCount}");
 
             // Waiting：应只开 A 会话并 Out 5
-            if (!session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out var f1) || f1 != A)
+            if (!session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out var f1, out _) || f1 != A)
             {
                 Console.WriteLine($"FAIL: 期望会话 A，得到 {f1}");
                 fail++;
@@ -96,7 +96,7 @@ internal static class SerialOverlapSim
             Console.WriteLine($"[4] 组A 仍在判，组B 又暂存 3 张，Staged={img.StagedCount}");
 
             // 持续 Waiting：仍应只 Flush A（0张），B 留下
-            if (!session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out var f2) || f2 != A)
+            if (!session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out var f2, out _) || f2 != A)
             {
                 Console.WriteLine($"FAIL: 持续Waiting仍应绑定A，得到 {f2}");
                 fail++;
@@ -119,7 +119,7 @@ internal static class SerialOverlapSim
 
             // --- 组A 整组结束 + 仍 Waiting：不能开B ---
             session.NotifyFolderGroupFinished(A, "OK+Enter", uiStillWaiting: true);
-            if (session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out _))
+            if (session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out _, out _))
             {
                 Console.WriteLine("FAIL: 等离开Waiting期间不应Flush B");
                 fail++;
@@ -128,7 +128,7 @@ internal static class SerialOverlapSim
 
             // --- 离开 Waiting + 500ms 延迟 ---
             session.OnHaranMatchKind(HaranUiMatchService.MatchKind.Unknown);
-            if (session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out _))
+            if (session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out _, out _))
             {
                 Console.WriteLine("FAIL: 冷却期内不应开B");
                 fail++;
@@ -138,7 +138,7 @@ internal static class SerialOverlapSim
             Console.WriteLine("[7] 模拟冷却 500ms…");
             Thread.Sleep(520);
 
-            if (!session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out var f3) || f3 != B)
+            if (!session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out var f3, out _) || f3 != B)
             {
                 Console.WriteLine($"FAIL: 冷却后应开会话B，得到 {f3}");
                 fail++;

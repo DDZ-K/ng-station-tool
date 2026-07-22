@@ -122,7 +122,7 @@ internal static class DelayedWaitSim
 
             // 3) 终于匹配到 Waiting → 会话 Flush → 应入 DMC
             Console.WriteLine("[4] Waiting MATCHED now → session flush");
-            if (!session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out var fk) || fk != folder)
+            if (!session.TryGetFolderToFlush(img.PeekFirstStagedFolder, out var fk, out _) || fk != folder)
             {
                 Console.WriteLine($"FAIL: expected session folder {folder}, got {fk}");
                 fail++;
