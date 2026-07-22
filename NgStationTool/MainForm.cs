@@ -110,7 +110,7 @@ public sealed class MainForm : Form
             catch (Exception ex) { _log.Warn("会话", "组结束回调: " + ex.Message); }
         };
 
-        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.6";
+        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.5";
         Width = 980;
         Height = 640;
         StartPosition = FormStartPosition.CenterScreen;
@@ -248,7 +248,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Load += (_, _) =>
         {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.6 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
+            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.5 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
             if (_cfg.AutoStartOnLaunch)
                 StartAll();
             else

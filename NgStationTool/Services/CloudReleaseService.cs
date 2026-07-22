@@ -421,8 +421,7 @@ public sealed class CloudReleaseService : IDisposable
     }
 
     /// <summary>
-    /// 在待确认池中找「被 log 文件名包含」的 DMC；多命中时取最长匹配。
-    /// 兼容 Windows 副本后缀：DMC 为 xxx (1) 时，log 仅为 07-xxx 也能命中。
+    /// 在待确认池中找「被 log 文件名包含」的 DMC；多命中时取最长匹配，降低短串误匹配。
     /// </summary>
     private string? FindPendingDmcContainedInFileName(string logPath)
     {
@@ -430,70 +429,15 @@ public sealed class CloudReleaseService : IDisposable
         if (string.IsNullOrEmpty(name)) return null;
 
         string? best = null;
-        var bestScore = -1;
         foreach (var item in _cache.Snapshot())
         {
             var d = item.Dmc?.Trim();
             if (string.IsNullOrEmpty(d)) continue;
-
-            var score = ScoreLogNameAgainstDmc(name, d);
-            if (score <= 0) continue;
-            // 分高优先；同分取更长的「核心名」
-            if (score > bestScore || (score == bestScore && CoreDmcName(d).Length > CoreDmcName(best ?? "").Length))
-            {
+            if (name.IndexOf(d, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (best == null || d.Length > best.Length)
                 best = d;
-                bestScore = score;
-            }
         }
         return best;
-    }
-
-    /// <summary>
-    /// 0=不匹配；2=完整 DMC 被包含；1=去掉尾部「 (n)」后的核心名被包含。
-    /// </summary>
-    private static int ScoreLogNameAgainstDmc(string logNameWithoutExt, string dmc)
-    {
-        if (logNameWithoutExt.IndexOf(dmc, StringComparison.OrdinalIgnoreCase) >= 0)
-            return 2;
-
-        var core = CoreDmcName(dmc);
-        if (core.Length >= 4
-            && !string.Equals(core, dmc, StringComparison.OrdinalIgnoreCase)
-            && logNameWithoutExt.IndexOf(core, StringComparison.OrdinalIgnoreCase) >= 0)
-            return 1;
-
-        // 再试：log 侧也去掉 (n)
-        var logCore = CoreDmcName(logNameWithoutExt);
-        if (logCore.Length >= 4
-            && (logCore.IndexOf(core, StringComparison.OrdinalIgnoreCase) >= 0
-                || core.IndexOf(logCore, StringComparison.OrdinalIgnoreCase) >= 0))
-        {
-            // 仅当核心足够长，避免 GENR_1 误伤 GENR_1001：要求匹配段长度 == min 或更长一侧以边界更好
-            if (core.Equals(logCore, StringComparison.OrdinalIgnoreCase))
-                return 1;
-            if (logCore.IndexOf(core, StringComparison.OrdinalIgnoreCase) >= 0)
-                return 1;
-        }
-        return 0;
-    }
-
-    /// <summary>去掉 Windows 复制产生的尾缀「 (1)」「 (2)」等。</summary>
-    internal static string CoreDmcName(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name)) return "";
-        var s = name.Trim();
-        // "xxx (1)" / "xxx(1)" at end
-        var i = s.LastIndexOf('(');
-        if (i > 0 && s.EndsWith(")", StringComparison.Ordinal))
-        {
-            var inner = s.Substring(i + 1, s.Length - i - 2).Trim();
-            if (inner.Length > 0 && inner.All(char.IsDigit))
-            {
-                var core = s.Substring(0, i).TrimEnd();
-                if (core.Length > 0) return core;
-            }
-        }
-        return s;
     }
 
     /// <summary>
