@@ -227,6 +227,8 @@ public sealed class HaranUiMatchService : IDisposable
         var idleDir = Path.Combine(cfg.ResolvedHaranTemplateRoot(), "idle");
         var waitDir = Path.Combine(cfg.ResolvedHaranTemplateRoot(), "waiting");
         string? hitIdle = null, hitWait = null;
+        var idleCount = 0;
+        var waitCount = 0;
 
         if (Directory.Exists(idleDir))
         {
@@ -236,6 +238,7 @@ public sealed class HaranUiMatchService : IDisposable
                 {
                     using var t = LoadClone(f);
                     var s = Similarity(crop, t);
+                    idleCount++;
                     if (s > bestIdle) { bestIdle = s; hitIdle = Path.GetFileName(f); }
                 }
                 catch { /* */ }
@@ -249,24 +252,38 @@ public sealed class HaranUiMatchService : IDisposable
                 {
                     using var t = LoadClone(f);
                     var s = Similarity(crop, t);
+                    waitCount++;
                     if (s > bestWait) { bestWait = s; hitWait = Path.GetFileName(f); }
                 }
                 catch { /* */ }
             }
         }
 
-        var min = cfg.HaranMinScore;
-        // 禁止给 wait 人工加分。严格比分：谁更高且过阈值判谁；并列则 Unknown。
-        var waitOk = bestWait >= min;
-        var idleOk = bestIdle >= min;
+        // 无 idle 模板时：只靠 wait 极易把「Currently no Repair Data」误判成 Waiting
+        // （底栏都是蓝条，缩图后文字差被抹平）。无 idle 时提高阈值，并要求 wait 明显更高。
+        var baseMin = cfg.HaranMinScore;
+        var hasIdleTpl = idleCount > 0;
+        var hasWaitTpl = waitCount > 0;
+        var minWait = hasIdleTpl ? baseMin : Math.Min(0.98, baseMin + 0.08);
+        var margin = Math.Max(0.03, cfg.HaranWaitOverIdleMargin);
+
+        if (!hasIdleTpl && hasWaitTpl && bestWait >= baseMin)
+        {
+            // 节流警告在 Loop 的分数日志里可见 idle=0
+        }
+
+        var waitOk = bestWait >= minWait;
+        var idleOk = hasIdleTpl && bestIdle >= baseMin;
+
+        // 两边都过线：必须 wait 比 idle 高出 margin，否则 Unknown（宁可漏判不误放）
         if (waitOk && idleOk)
         {
-            if (bestWait > bestIdle)
+            if (bestWait >= bestIdle + margin)
             {
                 hitFile = hitWait;
                 return MatchKind.Waiting;
             }
-            if (bestIdle > bestWait)
+            if (bestIdle >= bestWait + margin)
             {
                 hitFile = hitIdle;
                 return MatchKind.Idle;
@@ -274,8 +291,15 @@ public sealed class HaranUiMatchService : IDisposable
             hitFile = hitWait ?? hitIdle;
             return MatchKind.Unknown;
         }
+
+        // 仅 wait 过线：无 idle 模板时已用更高 minWait；有 idle 但 idle 未过线时，仍要求 wait 明显高于 idle
         if (waitOk)
         {
+            if (hasIdleTpl && bestWait < bestIdle + margin)
+            {
+                hitFile = hitWait;
+                return MatchKind.Unknown;
+            }
             hitFile = hitWait;
             return MatchKind.Waiting;
         }
@@ -323,6 +347,8 @@ public sealed class HaranUiMatchService : IDisposable
             var title = sb.ToString();
             if (string.IsNullOrWhiteSpace(title)) return true;
             if (title.Contains("工位工具", StringComparison.OrdinalIgnoreCase)) return true;
+            if (title.Contains("NgStationTool", StringComparison.OrdinalIgnoreCase)) return true;
+            if (title.Contains("运行日志", StringComparison.OrdinalIgnoreCase)) return true;
             if (filters.Any(f => title.Contains(f, StringComparison.OrdinalIgnoreCase)))
                 list.Add((h, title, pid));
             return true;
@@ -406,8 +432,9 @@ public sealed class HaranUiMatchService : IDisposable
 
     private static double Similarity(Bitmap a, Bitmap b)
     {
-        using var aa = Resize(a, 320, 32);
-        using var bb = Resize(b, 320, 32);
+        // 提高分辨率，减轻「Waiting for Input」与「Currently no Repair Data」被糊成同一块蓝条
+        using var aa = Resize(a, 640, 48);
+        using var bb = Resize(b, 640, 48);
         long sum = 0;
         long n = 0;
         for (var y = 0; y < aa.Height; y++)
@@ -415,11 +442,32 @@ public sealed class HaranUiMatchService : IDisposable
         {
             var ca = aa.GetPixel(x, y);
             var cb = bb.GetPixel(x, y);
-            sum += Math.Abs((ca.R + ca.G + ca.B) / 3 - (cb.R + cb.G + cb.B) / 3);
+            // 略加重绿色通道（状态条文字常在亮底上）
+            var ga = (ca.R + ca.G * 2 + ca.B) / 4;
+            var gb = (cb.R + cb.G * 2 + cb.B) / 4;
+            sum += Math.Abs(ga - gb);
             n++;
         }
         if (n == 0) return 0;
-        return Math.Max(0, 1.0 - sum / (double)n / 255.0);
+        var full = Math.Max(0, 1.0 - sum / (double)n / 255.0);
+
+        // 中部文字带再比一次（排除左右装饰），取更严的分数（较低者）→ 更不易误判
+        var x0 = aa.Width / 8;
+        var x1 = aa.Width - x0;
+        long sum2 = 0;
+        long n2 = 0;
+        for (var y = 0; y < aa.Height; y++)
+        for (var x = x0; x < x1; x++)
+        {
+            var ca = aa.GetPixel(x, y);
+            var cb = bb.GetPixel(x, y);
+            var ga = (ca.R + ca.G * 2 + ca.B) / 4;
+            var gb = (cb.R + cb.G * 2 + cb.B) / 4;
+            sum2 += Math.Abs(ga - gb);
+            n2++;
+        }
+        var mid = n2 == 0 ? full : Math.Max(0, 1.0 - sum2 / (double)n2 / 255.0);
+        return Math.Min(full, mid);
     }
 
     private static Bitmap Resize(Bitmap src, int w, int h)

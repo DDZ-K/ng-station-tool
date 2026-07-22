@@ -95,6 +95,8 @@ public sealed class AppConfig
     public double HaranMinScore { get; set; } = 0.86;
     /// <summary>连续多少帧一致才切换状态（防闪）</summary>
     public int HaranStableFrames { get; set; } = 2;
+    /// <summary>判 Waiting 时 wait 分至少比 idle 高多少（防两态底栏太像）。</summary>
+    public double HaranWaitOverIdleMargin { get; set; } = 0.05;
     public bool HaranRoiFromBottom { get; set; } = true;
     public int HaranRoiBottomOffset { get; set; } = 0;
     public int HaranRoiLeft { get; set; } = 0;
