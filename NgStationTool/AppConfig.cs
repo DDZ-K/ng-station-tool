@@ -59,10 +59,14 @@ public sealed class AppConfig
     public bool EnqueueFromNgImageWatch { get; set; } = false;
     /// <summary>图片复制成功后是否把「改名后完整文件名（无扩展名）」作为 DMC 入缓存。</summary>
     public bool EnqueueFromImageCopyFolderName { get; set; } = true;
-    /// <summary>OK/NOK 判定后是否在「同文件夹组全部结束后」再按回车。</summary>
+    /// <summary>整夹全部 OK/NOK 后是否再按一次回车。</summary>
     public bool EnterAfterFolderAllDone { get; set; } = true;
-    /// <summary>整夹全部判定结束后的确认键，默认 Enter。</summary>
+    /// <summary>整夹确认键，默认 Enter。</summary>
     public string ConfirmEnterKey { get; set; } = "Enter";
+    /// <summary>最后一张 9/7 之后，延迟多久再按回车（ms）。HARAN 常需要消化最后一键。</summary>
+    public int EnterAfterLastKeyDelayMs { get; set; } = 500;
+    /// <summary>回车连按次数（默认 1；个别机台可设 2）。</summary>
+    public int EnterRepeatCount { get; set; } = 1;
     public int LogReadyBudgetMs { get; set; } = 2000;
     public int KeyPressDelayMs { get; set; } = 50;
     public int ActivateWindowDelayMs { get; set; } = 150;

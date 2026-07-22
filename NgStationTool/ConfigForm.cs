@@ -52,6 +52,8 @@ public sealed class ConfigForm : Form
     private readonly NumericUpDown _logReadyBudget;
     private readonly NumericUpDown _keyPressDelay;
     private readonly NumericUpDown _activateDelay;
+    private readonly NumericUpDown _enterAfterLastKeyDelay;
+    private readonly NumericUpDown _enterRepeat;
     private readonly NumericUpDown _uiRefresh;
     private readonly NumericUpDown _maxLogLines;
 
@@ -173,6 +175,10 @@ public sealed class ConfigForm : Form
         _enterAfterAll = AddCheck(p2, ref y,
             "同文件夹多 NG：全部 OK/NOK 结束后才按回车（有超时则不回车；每条仍先按 OK/NG 键）",
             cfg.EnterAfterFolderAllDone);
+        AddLabel(p2, ref y, "EnterAfterLastKeyDelayMs 最后一张9/7后延迟多久再回车（建议500～1000）");
+        _enterAfterLastKeyDelay = AddNum(p2, ref y, cfg.EnterAfterLastKeyDelayMs, 0, 10000);
+        AddLabel(p2, ref y, "EnterRepeatCount 回车连按次数（默认1，丢键可试2）");
+        _enterRepeat = AddNum(p2, ref y, cfg.EnterRepeatCount, 1, 5);
         AddLabel(p2, ref y, "目标窗口标题包含（可空=当前前台）");
         _winTitle = AddTb(p2, ref y, cfg.TargetWindowTitleContains);
         AddLabel(p2, ref y, "目标进程名（不含 .exe，可空）");
@@ -416,6 +422,8 @@ public sealed class ConfigForm : Form
         src.KeyRepeatCount = (int)_keyRepeat.Value;
         src.ConfirmEnterKey = string.IsNullOrWhiteSpace(_confirmEnter.Text) ? "Enter" : _confirmEnter.Text.Trim();
         src.EnterAfterFolderAllDone = _enterAfterAll.Checked;
+        src.EnterAfterLastKeyDelayMs = (int)_enterAfterLastKeyDelay.Value;
+        src.EnterRepeatCount = (int)_enterRepeat.Value;
         src.TargetWindowTitleContains = _winTitle.Text.Trim();
         src.TargetProcessName = _procName.Text.Trim();
 

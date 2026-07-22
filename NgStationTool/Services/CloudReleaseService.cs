@@ -381,48 +381,66 @@ public sealed class CloudReleaseService : IDisposable
         if (string.IsNullOrEmpty(folderKey)) return;
 
         var remain = _cache.CountInFolder(folderKey);
-        if (remain > 0)
-        {
-            _log.Info("放行", $"文件夹组={folderKey} 尚有 {remain} 条未判定，暂不回车（本次={reason}）");
-            return;
-        }
+                if (remain > 0)
+                {
+                    _log.Info("放行", $"文件夹组={folderKey} 尚有 {remain} 条未判定，暂不回车（本次={reason}）");
+                    return;
+                }
 
-        // 组内全部出队完毕 → 通知会话协调器（含超时不回车）
-        try { FolderGroupFinished?.Invoke(folderKey, reason); }
-        catch (Exception ex) { _log.Warn("放行", "FolderGroupFinished 回调异常: " + ex.Message); }
+                // 组内出现过超时 → 不回车（仍通知会话结束）
+                if (string.Equals(reason, "timeout", StringComparison.OrdinalIgnoreCase)
+                    || _folderHadTimeout.ContainsKey(folderKey))
+                {
+                    _log.Warn("放行", $"文件夹组={folderKey} 全部结束但含超时，不按回车（原因={reason}）");
+                    _folderHadTimeout.TryRemove(folderKey, out _);
+                    try { FolderGroupFinished?.Invoke(folderKey, reason); }
+                    catch (Exception ex) { _log.Warn("放行", "FolderGroupFinished 回调异常: " + ex.Message); }
+                    return;
+                }
 
-        // 组内出现过超时 → 不回车
-        if (string.Equals(reason, "timeout", StringComparison.OrdinalIgnoreCase)
-            || _folderHadTimeout.ContainsKey(folderKey))
-        {
-            _log.Warn("放行", $"文件夹组={folderKey} 全部结束但含超时，不按回车（原因={reason}）");
-            _folderHadTimeout.TryRemove(folderKey, out _);
-            return;
-        }
+                var enterKey = string.IsNullOrWhiteSpace(cfg.ConfirmEnterKey) ? "Enter" : cfg.ConfirmEnterKey.Trim();
+                if (_canPressKeys != null && !_canPressKeys())
+                {
+                    _log.Warn("放行", $"文件夹组={folderKey} 应回车但 HARAN 非 Waiting，跳过回车");
+                    // 仍通知会话结束，避免永远卡会话
+                    try { FolderGroupFinished?.Invoke(folderKey, reason + "+noEnter"); }
+                    catch (Exception ex) { _log.Warn("放行", "FolderGroupFinished 回调异常: " + ex.Message); }
+                    return;
+                }
 
-        var enterKey = string.IsNullOrWhiteSpace(cfg.ConfirmEnterKey) ? "Enter" : cfg.ConfirmEnterKey.Trim();
-        if (_canPressKeys != null && !_canPressKeys())
-        {
-            _log.Warn("放行", $"文件夹组={folderKey} 应回车但 HARAN 非 Waiting，跳过回车");
-            return;
-        }
-        _log.Info("放行", $"文件夹组={folderKey} 全部判定结束(无超时) → 按 {enterKey}（触发原因={reason}）");
-        var ok = _keyboard.SendKey(
-            enterKey,
-            1,
-            cfg.KeyPressDelayMs,
-            string.IsNullOrWhiteSpace(cfg.TargetWindowTitleContains) ? null : cfg.TargetWindowTitleContains,
-            string.IsNullOrWhiteSpace(cfg.TargetProcessName) ? null : cfg.TargetProcessName,
-            cfg.ActivateWindowDelayMs);
-        if (!ok)
-            _log.Error("放行", $"回车键发送失败 组={folderKey} key={enterKey}");
-        else
-            _log.Success("放行", $"已回车 组={folderKey}");
-    }
+                // 最后一张 9/7 刚按下，HARAN 往往还在处理；立即回车容易丢
+                var enterDelay = Math.Max(0, cfg.EnterAfterLastKeyDelayMs);
+                if (enterDelay > 0)
+                {
+                    _log.Info("放行",
+                        $"文件夹组={folderKey} 全部判定结束 → 延迟 {enterDelay}ms 后再按 {enterKey}（触发={reason}）");
+                    Thread.Sleep(enterDelay);
+                }
+                else
+                {
+                    _log.Info("放行", $"文件夹组={folderKey} 全部判定结束 → 按 {enterKey}（触发={reason}）");
+                }
 
-    /// <summary>
-    /// 在待确认池中找「被 log 文件名包含」的 DMC；多命中时取最长匹配，降低短串误匹配。
-    /// </summary>
+                if (_canPressKeys != null && !_canPressKeys())
+                    _log.Warn("放行", $"延迟后 HARAN 非 Waiting，仍尝试回车 组={folderKey}");
+
+                var enterRepeat = Math.Max(1, cfg.EnterRepeatCount);
+                var ok = _keyboard.SendKey(
+                    enterKey,
+                    enterRepeat,
+                    Math.Max(cfg.KeyPressDelayMs, 80),
+                    string.IsNullOrWhiteSpace(cfg.TargetWindowTitleContains) ? null : cfg.TargetWindowTitleContains,
+                    string.IsNullOrWhiteSpace(cfg.TargetProcessName) ? null : cfg.TargetProcessName,
+                    Math.Max(cfg.ActivateWindowDelayMs, 100));
+                if (!ok)
+                    _log.Error("放行", $"回车键发送失败 组={folderKey} key={enterKey}");
+                else
+                    _log.Success("放行", $"已回车 组={folderKey} key={enterKey} x{enterRepeat}（末键后延迟 {enterDelay}ms）");
+
+                // 回车完成后再通知会话结束（避免会话先切走影响其它逻辑）
+                try { FolderGroupFinished?.Invoke(folderKey, reason); }
+                catch (Exception ex) { _log.Warn("放行", "FolderGroupFinished 回调异常: " + ex.Message); }
+            }
     private string? FindPendingDmcContainedInFileName(string logPath)
     {
         var name = Path.GetFileNameWithoutExtension(logPath) ?? "";
