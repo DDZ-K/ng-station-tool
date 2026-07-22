@@ -11,6 +11,7 @@ public sealed class MainForm : Form
     private readonly ImageCopyWatcher _imageWatcher;
     private readonly CloudReleaseService _cloud;
     private readonly HaranUiMatchService _haran;
+    private readonly JudgmentSessionCoordinator _session;
     private readonly System.Windows.Forms.Timer _uiTimer;
 
     private readonly Label _lblStatus;
@@ -34,7 +35,21 @@ public sealed class MainForm : Form
         _log = new AppLogger(logPath, _cfg.MaxLogLines);
         _cache = new DmcPendingCache(_log, _cfg.PendingTimeoutSec);
         _keyboard = new KeyboardService(_log);
-        _haran = new HaranUiMatchService(_log, () => _cfg);
+        // needMatch 稍后绑定（依赖 _imageWatcher/_session/_cache）
+        JudgmentSessionCoordinator? sessionRef = null;
+        ImageCopyWatcher? imgRef = null;
+        DmcPendingCache cacheRef = _cache;
+        _haran = new HaranUiMatchService(_log, () => _cfg, () =>
+        {
+            if (!_cfg.EnableHaranUiGate) return false;
+            // 1) 有改名暂存图  2) 判定会话中/等离开Waiting  3) DMC 缓存待按键
+            if (imgRef != null && imgRef.StagedCount > 0) return true;
+            if (sessionRef != null && sessionRef.HasActiveSession) return true;
+            if (cacheRef.Count > 0) return true;
+            return false;
+        });
+        _session = new JudgmentSessionCoordinator(_log, () => _cfg);
+        sessionRef = _session;
         _cloud = new CloudReleaseService(_log, () => _cfg, _cache, _keyboard, () =>
         {
             if (!_cfg.EnableHaranUiGate || !_cfg.HaranGateKeys) return true;
@@ -51,36 +66,51 @@ public sealed class MainForm : Form
                 if (!_cfg.EnableHaranUiGate) return true;
                 return _haran.IsWaiting;
             });
-        _haran.EnteredWaiting += () =>
+        imgRef = _imageWatcher;
+
+        void TryFlushBySession(string reason)
         {
             try
             {
-                var n = _imageWatcher.FlushStagedToOutput();
+                if (_imageWatcher.StagedCount <= 0 && !_session.HasActiveSession) return;
+
+                if (!_cfg.HaranSerialSessions)
+                {
+                    var all = _imageWatcher.FlushStagedToOutput(null);
+                    if (all > 0)
+                        _log.Success("HARAN", $"{reason}：输出暂存 {all} 张（非串行）");
+                    return;
+                }
+
+                if (!_session.TryGetFolderToFlush(_imageWatcher.PeekFirstStagedFolder, out var folder))
+                    return;
+
+                // folder null + serial off already handled; serial true always returns folder name when ok
+                var n = _imageWatcher.FlushStagedToOutput(folder);
                 if (n > 0)
-                    _log.Success("HARAN", $"Waiting：已输出暂存图 {n} 张到 Out");
+                    _log.Success("HARAN",
+                        $"{reason}：会话组={folder} 输出 {n} 张 | {_session.Describe()}");
             }
             catch (Exception ex)
             {
-                _log.Error("HARAN", "Flush 暂存失败: " + ex.Message);
+                _log.Error("HARAN", $"{reason} Flush 失败: " + ex.Message);
             }
+        }
+
+        _haran.EnteredWaiting += () => TryFlushBySession("进入Waiting");
+        _haran.StillWaiting += () => TryFlushBySession("Waiting持续");
+        _haran.StateChanged += kind =>
+        {
+            try { _session.OnHaranMatchKind(kind); }
+            catch (Exception ex) { _log.Warn("会话", "状态回调: " + ex.Message); }
         };
-        // 轮询持续 Waiting 时也冲刷（避免只触发一次上升沿、后续多图卡在暂存）
-        _haran.StillWaiting += () =>
+        _cloud.FolderGroupFinished += (fk, reason) =>
         {
-            try
-            {
-                if (_imageWatcher.StagedCount <= 0) return;
-                var n = _imageWatcher.FlushStagedToOutput();
-                if (n > 0)
-                    _log.Success("HARAN", $"Waiting 持续中：又输出暂存图 {n} 张");
-            }
-            catch (Exception ex)
-            {
-                _log.Error("HARAN", "持续 Flush 失败: " + ex.Message);
-            }
+            try { _session.NotifyFolderGroupFinished(fk, reason, uiStillWaiting: _haran.IsWaiting); }
+            catch (Exception ex) { _log.Warn("会话", "组结束回调: " + ex.Message); }
         };
 
-        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.2";
+        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.3.5";
         Width = 980;
         Height = 640;
         StartPosition = FormStartPosition.CenterScreen;
@@ -218,7 +248,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Load += (_, _) =>
         {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.2 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
+            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.3.5 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
             if (_cfg.AutoStartOnLaunch)
                 StartAll();
             else
@@ -235,6 +265,7 @@ public sealed class MainForm : Form
                 _cfg.HaranTemplateRoot = _cfg.ResolvedHaranTemplateRoot();
             _cache.SetTimeoutSec(_cfg.PendingTimeoutSec);
             _log.SetMaxLines(_cfg.MaxLogLines);
+            _session.Reset();
             _haran.Start();
             _imageWatcher.Start();
             _cloud.Start();
@@ -253,6 +284,7 @@ public sealed class MainForm : Form
         _imageWatcher.Stop();
         _cloud.Stop();
         _haran.Stop();
+        _session.Reset();
         _btnStart.Enabled = true;
         _btnStop.Enabled = false;
         UpdateStatus();
@@ -346,7 +378,9 @@ public sealed class MainForm : Form
         var haran = !_cfg.EnableHaranUiGate
             ? "HARAN门闩关"
             : (_haran.IsRunning
-                ? $"HARAN={_haran.LastKind} 暂存={_imageWatcher.StagedCount}"
+                ? (_haran.IsActivelyMatching
+                    ? $"HARAN={_haran.LastKind} 轮询中 暂存={_imageWatcher.StagedCount} {_session.Describe()}"
+                    : $"HARAN=待命(等改名暂存) 暂存={_imageWatcher.StagedCount} {_session.Describe()}")
                 : "HARAN✗");
         var run = _imageWatcher.IsRunning || _cloud.IsRunning || _haran.IsRunning ? "运行中" : "已停止";
         _lblStatus.Text =

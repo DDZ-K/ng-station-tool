@@ -69,6 +69,8 @@ public sealed class ConfigForm : Form
     private readonly NumericUpDown _haranTop;
     private readonly NumericUpDown _haranW;
     private readonly NumericUpDown _haranH;
+    private readonly CheckBox _haranSerial;
+    private readonly NumericUpDown _haranNextDelay;
 
     public ConfigForm(AppConfig cfg)
     {
@@ -253,10 +255,16 @@ public sealed class ConfigForm : Form
         _haranW = AddNum(p4, ref y, cfg.HaranRoiWidth, 0, 4000);
         AddLabel(p4, ref y, "高度 Height（状态栏建议 40～60）");
         _haranH = AddNum(p4, ref y, cfg.HaranRoiHeight, 8, 800);
+        _haranSerial = AddCheck(p4, ref y,
+            "A/B 重叠串行：同一时间只放行一个文件夹组（前组结束+离开Waiting后再开下一组）",
+            cfg.HaranSerialSessions);
+        y += 4;
+        AddLabel(p4, ref y, "离开 Waiting 后延迟再开下一组 HaranNextSessionDelayMs（建议 500）");
+        _haranNextDelay = AddNum(p4, ref y, cfg.HaranNextSessionDelayMs, 0, 10000);
         AddNote(p4, ref y,
-            "模板：用 HaranUiProbe v2.1 框选同样区域，空闲多存几张（含 archiving），待判存 Waiting。\n" +
-            "把 probe 的 templates\\idle 与 waiting 拷到本页「模板根目录」下即可。\n" +
-            "改 ROI/模板后请停止再开始。");
+            "顺序：①图片改名进暂存 → ②才截图找 Waiting → ③Out/入DMC → ④云端log按键。\n" +
+            "一点「开始」不会立刻找 wait；无暂存/无待判时状态显示「待命」。\n" +
+            "串行：片1 整组9/7+回车 → 等界面不再 Waiting → 延迟 → 片2 再匹配 Waiting 后才 Out。");
         tabHaran.Controls.Add(p4);
 
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 52 };
@@ -444,6 +452,8 @@ public sealed class ConfigForm : Form
         src.HaranRoiTop = (int)_haranTop.Value;
         src.HaranRoiWidth = (int)_haranW.Value;
         src.HaranRoiHeight = (int)_haranH.Value;
+        src.HaranSerialSessions = _haranSerial.Checked;
+        src.HaranNextSessionDelayMs = (int)_haranNextDelay.Value;
 
         return src;
     }

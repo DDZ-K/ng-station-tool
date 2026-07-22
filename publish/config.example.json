@@ -3,7 +3,14 @@
   "enableCloudRelease": true,
   "watchRoot": "D:\\WatchRoot",
   "outputRoot": "D:\\OutputRoot",
-  "imageExtensions": [ ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp" ],
+  "imageExtensions": [
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".bmp",
+    ".webp"
+  ],
   "sizeStableChecks": 2,
   "sizeStableIntervalMs": 200,
   "retryDelayMs": 150,
@@ -21,9 +28,19 @@
   "ngImageRoot": "D:\\OutputRoot",
   "cloudLogRoot": "D:\\CloudResult",
   "cloudLogArchiveRoot": "D:\\CloudResult\\done",
-  "logExtensions": [ ".log", ".txt" ],
-  "okTokens": [ "OK", "PASS" ],
-  "nokTokens": [ "NOK", "NG", "FAIL" ],
+  "logExtensions": [
+    ".log",
+    ".txt"
+  ],
+  "okTokens": [
+    "OK",
+    "PASS"
+  ],
+  "nokTokens": [
+    "NOK",
+    "NG",
+    "FAIL"
+  ],
   "resultMatchIgnoreCase": true,
   "dmcFromImage": "FileStem",
   "dmcFromLog": "FileStem",
@@ -41,5 +58,18 @@
   "requireNumPad": true,
   "autoStartOnLaunch": false,
   "maxLogLines": 500,
-  "uiRefreshMs": 500
+  "uiRefreshMs": 500,
+  "enableHaranUiGate": false,
+  "haranGateKeys": true,
+  "haranWindowTitleFilter": "HARAN;Repair Station;Semi-automatic",
+  "haranTemplateRoot": "",
+  "haranPollMs": 300,
+  "haranMinScore": 0.86,
+  "haranStableFrames": 2,
+  "haranRoiFromBottom": true,
+  "haranRoiBottomOffset": 0,
+  "haranRoiLeft": 0,
+  "haranRoiTop": 0,
+  "haranRoiWidth": 0,
+  "haranRoiHeight": 48
 }

@@ -45,6 +45,9 @@ public sealed class CloudReleaseService : IDisposable
         _canPressKeys = canPressKeys;
     }
 
+    /// <summary>同文件夹组全部结束（回车成功/跳过/超时）时通知，用于会话串行。</summary>
+    public event Action<string, string>? FolderGroupFinished;
+
     public void EnqueueDmc(string dmc, string source, string? path = null, string? folderKey = null)
         => _cache.TryEnqueue(dmc, source, path, folderKey);
 
@@ -383,6 +386,10 @@ public sealed class CloudReleaseService : IDisposable
             _log.Info("放行", $"文件夹组={folderKey} 尚有 {remain} 条未判定，暂不回车（本次={reason}）");
             return;
         }
+
+        // 组内全部出队完毕 → 通知会话协调器（含超时不回车）
+        try { FolderGroupFinished?.Invoke(folderKey, reason); }
+        catch (Exception ex) { _log.Warn("放行", "FolderGroupFinished 回调异常: " + ex.Message); }
 
         // 组内出现过超时 → 不回车
         if (string.Equals(reason, "timeout", StringComparison.OrdinalIgnoreCase)

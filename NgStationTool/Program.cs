@@ -10,11 +10,23 @@ internal static class Program
         static void Main(string[] args)
         {
             if (args.Any(a => string.Equals(a, "--self-test", StringComparison.OrdinalIgnoreCase)))
-            {
-                var code = SelfTest.Run();
-                Environment.Exit(code);
-                return;
-            }
+                        {
+                            var code = SelfTest.Run();
+                            Environment.Exit(code);
+                            return;
+                        }
+                        if (args.Any(a => string.Equals(a, "--sim-serial", StringComparison.OrdinalIgnoreCase)))
+                                    {
+                                        var code = SerialOverlapSim.Run();
+                                        Environment.Exit(code);
+                                        return;
+                                    }
+                                    if (args.Any(a => string.Equals(a, "--sim-delayed-wait", StringComparison.OrdinalIgnoreCase)))
+                                    {
+                                        var code = DelayedWaitSim.Run(args);
+                                        Environment.Exit(code);
+                                        return;
+                                    }
 
             using var mutex = new Mutex(true, MutexName, out var created);
             if (!created)

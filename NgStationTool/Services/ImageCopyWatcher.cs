@@ -376,17 +376,13 @@ public sealed class ImageCopyWatcher : IDisposable
             }
             _log.Success("图片", $"整夹已暂存 文件夹={folderName} 暂存队列={_staged.Count}");
 
-            // 若当前已是 Waiting：马上输出（多图也走同一条路径）
+            // 若当前已是 Waiting：不在此处整批冲刷（避免双片重叠时两组合流）；
+            // 由 HARAN 轮询 + 会话协调器按「当前组」Flush。
             var waitingNow = _canOutputToOut?.Invoke() ?? false;
             if (waitingNow)
-            {
-                _log.Info("图片", "当前已是 Waiting → 立即输出本批暂存");
-                FlushStagedToOutput();
-            }
+                _log.Info("图片", "当前已是 Waiting → 暂存已入队，由会话协调器按当前组输出");
             else
-            {
                 _log.Info("图片", "当前非 Waiting → 等待界面匹配到 Waiting for Input 再输出");
-            }
             return;
         }
 
@@ -434,20 +430,43 @@ public sealed class ImageCopyWatcher : IDisposable
             (dmcList.Count > 0 ? ("[" + string.Join(", ", dmcList) + "]") : ""));
     }
 
-    /// <summary>HARAN 进入 Waiting 时调用：把暂存改名图写入 OutputRoot 并入 DMC。</summary>
-    public int FlushStagedToOutput()
+    /// <summary>HARAN 进入/持续 Waiting 时：输出暂存。onlyFolder 非空时只输出该文件夹组，其余仍留在暂存。</summary>
+    public int FlushStagedToOutput(string? onlyFolder = null)
     {
         lock (_flushLock)
         {
             var cfg = _cfg();
-            var n = 0;
             var list = new List<StagedFile>();
             while (_staged.TryDequeue(out var s))
                 list.Add(s);
             if (list.Count == 0) return 0;
 
-            _log.Info("图片", $"Waiting 触发：开始输出暂存图 数量={list.Count}");
-            foreach (var item in list)
+            List<StagedFile> toFlush;
+            if (string.IsNullOrWhiteSpace(onlyFolder))
+            {
+                toFlush = list;
+            }
+            else
+            {
+                var key = onlyFolder.Trim();
+                toFlush = list.Where(x =>
+                    string.Equals(x.FolderName, key, StringComparison.OrdinalIgnoreCase)).ToList();
+                foreach (var keep in list.Where(x =>
+                             !string.Equals(x.FolderName, key, StringComparison.OrdinalIgnoreCase)))
+                    _staged.Enqueue(keep);
+                if (toFlush.Count == 0)
+                {
+                    _log.Info("图片", $"会话组={key} 暂存中无该组图片（总暂存其余仍排队）");
+                    return 0;
+                }
+            }
+
+            _log.Info("图片",
+                string.IsNullOrWhiteSpace(onlyFolder)
+                    ? $"Waiting 触发：输出全部暂存 数量={toFlush.Count}"
+                    : $"Waiting 触发：仅输出会话组={onlyFolder} 数量={toFlush.Count}（其它组继续排队）");
+            var n = 0;
+            foreach (var item in toFlush)
             {
                 try
                 {
@@ -470,8 +489,42 @@ public sealed class ImageCopyWatcher : IDisposable
                     _log.Error("图片", $"暂存输出失败 {item.SourcePath}: {ex.Message}");
                 }
             }
-            _log.Success("图片", $"暂存输出完成 成功={n}/{list.Count}");
+            _log.Success("图片", $"暂存输出完成 成功={n}/{toFlush.Count} 剩余暂存={_staged.Count}");
             return n;
+        }
+    }
+
+    /// <summary>暂存队列中最早出现的文件夹名（FIFO），无则 null。</summary>
+    public string? PeekFirstStagedFolder()
+    {
+        lock (_flushLock)
+        {
+            // ConcurrentQueue 无安全枚举快照：暂出再入
+            var list = new List<StagedFile>();
+            while (_staged.TryDequeue(out var s))
+                list.Add(s);
+            foreach (var s in list)
+                _staged.Enqueue(s);
+            return list.Select(x => x.FolderName).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+        }
+    }
+
+    /// <summary>自检/仿真：直接把已就绪源图放入暂存队列（不经监视器）。</summary>
+    public void EnqueueStagedForTest(string folderName, string sourcePath, string targetFileName)
+    {
+        lock (_flushLock)
+        {
+            long len = 0;
+            try { if (File.Exists(sourcePath)) len = new FileInfo(sourcePath).Length; } catch { /* */ }
+            _staged.Enqueue(new StagedFile
+            {
+                SourcePath = sourcePath,
+                TargetFileName = targetFileName,
+                Length = len,
+                ReadyMs = 0,
+                FolderName = folderName,
+                DayHint = DateTime.Now
+            });
         }
     }
 

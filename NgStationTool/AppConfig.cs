@@ -98,6 +98,10 @@ public sealed class AppConfig
     /// <summary>0=铺满到右边</summary>
     public int HaranRoiWidth { get; set; } = 0;
     public int HaranRoiHeight { get; set; } = 48;
+    /// <summary>A/B 重叠时只串行一个文件夹组：前组结束并离开 Waiting 后再开下一组。</summary>
+    public bool HaranSerialSessions { get; set; } = true;
+    /// <summary>离开 Waiting 后，再过多久才允许下一组会话（ms）。</summary>
+    public int HaranNextSessionDelayMs { get; set; } = 500;
 
     public string ResolvedHaranTemplateRoot()
     {

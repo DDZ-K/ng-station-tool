@@ -6,6 +6,7 @@ namespace NgStationTool.Services;
 
 /// <summary>
 /// HARAN 底栏/自定义区域多模板匹配（不依赖 UIA 读字）。
+/// 按需轮询：仅有图片暂存 / 会话中 / DMC 待判定时才截图找 Waiting。
 /// 模板：{TemplateRoot}/idle/*.png 与 waiting/*.png
 /// </summary>
 public sealed class HaranUiMatchService : IDisposable
@@ -14,11 +15,17 @@ public sealed class HaranUiMatchService : IDisposable
 
     private readonly AppLogger _log;
     private readonly Func<AppConfig> _cfg;
+    /// <summary>为 true 时才截图比模板。</summary>
+    private readonly Func<bool>? _needMatch;
     private CancellationTokenSource? _cts;
     private Task? _worker;
     private int _running;
     private MatchKind _last = MatchKind.Unknown;
     private int _stableHits;
+    private long _lastScoreLogTick;
+    private long _lastErrorLogTick;
+    private long _lastIdleLogTick;
+    private bool _wasMatching;
 
     public bool IsRunning => Volatile.Read(ref _running) == 1;
     public MatchKind LastKind => _last;
@@ -27,18 +34,18 @@ public sealed class HaranUiMatchService : IDisposable
     public double LastWaitScore { get; private set; }
     public string? LastHitFile { get; private set; }
     public string? LastError { get; private set; }
+    /// <summary>当前是否因「有活」而在截图轮询。</summary>
+    public bool IsActivelyMatching { get; private set; }
 
-    /// <summary>状态变化（含进入/离开 Waiting）</summary>
     public event Action<MatchKind>? StateChanged;
-    /// <summary>刚进入 Waiting（上升沿）</summary>
     public event Action? EnteredWaiting;
-    /// <summary>持续处于 Waiting（每轮轮询），用于冲刷后续暂存</summary>
     public event Action? StillWaiting;
 
-    public HaranUiMatchService(AppLogger log, Func<AppConfig> cfg)
+    public HaranUiMatchService(AppLogger log, Func<AppConfig> cfg, Func<bool>? needMatch = null)
     {
         _log = log;
         _cfg = cfg;
+        _needMatch = needMatch;
     }
 
     public void Start()
@@ -55,11 +62,13 @@ public sealed class HaranUiMatchService : IDisposable
         _cts = new CancellationTokenSource();
         _last = MatchKind.Unknown;
         _stableHits = 0;
+        _wasMatching = false;
+        IsActivelyMatching = false;
         _worker = Task.Factory.StartNew(() => Loop(_cts.Token), TaskCreationOptions.LongRunning);
         Volatile.Write(ref _running, 1);
         _log.Success("HARAN",
-            $"界面匹配已启动 轮询={cfg.HaranPollMs}ms 阈值={cfg.HaranMinScore:F2} 稳定帧={cfg.HaranStableFrames} " +
-            $"模板={cfg.ResolvedHaranTemplateRoot()}");
+            $"界面匹配服务已就绪（按需轮询） 轮询={cfg.HaranPollMs}ms 阈值={cfg.HaranMinScore:F2} " +
+            $"模板={cfg.ResolvedHaranTemplateRoot()} | 有图片暂存/待判定时才截图找 Waiting");
     }
 
     public void Stop()
@@ -70,6 +79,8 @@ public sealed class HaranUiMatchService : IDisposable
         _cts?.Dispose();
         _cts = null;
         _worker = null;
+        IsActivelyMatching = false;
+        _wasMatching = false;
         if (_last != MatchKind.Unknown)
         {
             _last = MatchKind.Unknown;
@@ -88,9 +99,24 @@ public sealed class HaranUiMatchService : IDisposable
                 var cfg = _cfg();
                 if (!cfg.EnableHaranUiGate)
                 {
+                    IsActivelyMatching = false;
                     Thread.Sleep(500);
                     continue;
                 }
+
+                var need = _needMatch?.Invoke() ?? true;
+                if (!need)
+                {
+                    EnterIdleStandby(cfg);
+                    continue;
+                }
+
+                if (!_wasMatching)
+                {
+                    _wasMatching = true;
+                    _log.Success("HARAN", "检测到待处理任务（暂存/会话/DMC）→ 开始截图轮询 Waiting");
+                }
+                IsActivelyMatching = true;
 
                 var kind = MatchOnce(cfg, out var idle, out var wait, out var hit);
                 LastIdleScore = idle;
@@ -98,10 +124,17 @@ public sealed class HaranUiMatchService : IDisposable
                 LastHitFile = hit;
                 LastError = null;
 
+                var nowTick = Environment.TickCount64;
+                if (nowTick - _lastScoreLogTick >= 2000)
+                {
+                    _lastScoreLogTick = nowTick;
+                    _log.Info("HARAN",
+                        $"轮询中 state={_last} frame={kind} idle={idle:F3} wait={wait:F3} thr={cfg.HaranMinScore:F2} hit={hit ?? "-"}");
+                }
+
                 if (kind == _last)
                 {
                     _stableHits = Math.Min(_stableHits + 1, 100);
-                    // 已在 Waiting：每轮通知一次，便于冲刷新入队的暂存图
                     if (kind == MatchKind.Waiting)
                     {
                         try { StillWaiting?.Invoke(); } catch { /* */ }
@@ -109,7 +142,6 @@ public sealed class HaranUiMatchService : IDisposable
                 }
                 else
                 {
-                    // 需连续 N 帧一致才切换，防闪
                     if (kind != MatchKind.Unknown)
                     {
                         _stableHits++;
@@ -136,11 +168,43 @@ public sealed class HaranUiMatchService : IDisposable
             catch (Exception ex)
             {
                 LastError = ex.Message;
+                var nowTick = Environment.TickCount64;
+                if (nowTick - _lastErrorLogTick >= 3000)
+                {
+                    _lastErrorLogTick = nowTick;
+                    _log.Warn("HARAN", "本轮匹配异常（继续轮询）: " + ex.Message);
+                }
             }
 
             var sleep = Math.Max(100, _cfg().HaranPollMs);
             try { token.WaitHandle.WaitOne(sleep); } catch { break; }
         }
+    }
+
+    private void EnterIdleStandby(AppConfig cfg)
+    {
+        IsActivelyMatching = false;
+        if (_wasMatching)
+        {
+            _wasMatching = false;
+            _log.Info("HARAN", "暂无待处理（无暂存/无会话/无DMC缓存）→ 暂停截图轮询，等图片改名暂存后再找 Waiting");
+            if (_last != MatchKind.Unknown)
+            {
+                _last = MatchKind.Unknown;
+                _stableHits = 0;
+                try { StateChanged?.Invoke(MatchKind.Unknown); } catch { /* */ }
+            }
+        }
+        else
+        {
+            var t = Environment.TickCount64;
+            if (t - _lastIdleLogTick >= 15000)
+            {
+                _lastIdleLogTick = t;
+                _log.Info("HARAN", "待命中：先等图片改名进入暂存，再开始 Waiting 匹配");
+            }
+        }
+        Thread.Sleep(Math.Max(200, cfg.HaranPollMs));
     }
 
     public MatchKind MatchOnce(AppConfig cfg, out double bestIdle, out double bestWait, out string? hitFile)
@@ -192,23 +256,33 @@ public sealed class HaranUiMatchService : IDisposable
         }
 
         var min = cfg.HaranMinScore;
-        // 两者都过阈值且接近时，优先 Waiting（避免真实 Waiting 被空闲模板 0.002 之差压过）
-        // 空闲模板常与待判底栏相似度都很高，会导致一直 Idle、暂存永不输出。
-        const double waitBias = 0.03;
-        if (bestWait >= min && bestWait + waitBias >= bestIdle)
+        // 禁止给 wait 人工加分。严格比分：谁更高且过阈值判谁；并列则 Unknown。
+        var waitOk = bestWait >= min;
+        var idleOk = bestIdle >= min;
+        if (waitOk && idleOk)
+        {
+            if (bestWait > bestIdle)
+            {
+                hitFile = hitWait;
+                return MatchKind.Waiting;
+            }
+            if (bestIdle > bestWait)
+            {
+                hitFile = hitIdle;
+                return MatchKind.Idle;
+            }
+            hitFile = hitWait ?? hitIdle;
+            return MatchKind.Unknown;
+        }
+        if (waitOk)
         {
             hitFile = hitWait;
             return MatchKind.Waiting;
         }
-        if (bestIdle >= min)
+        if (idleOk)
         {
             hitFile = hitIdle;
             return MatchKind.Idle;
-        }
-        if (bestWait >= min)
-        {
-            hitFile = hitWait;
-            return MatchKind.Waiting;
         }
         return MatchKind.Unknown;
     }
@@ -219,8 +293,6 @@ public sealed class HaranUiMatchService : IDisposable
         Directory.CreateDirectory(Path.Combine(root, "idle"));
         Directory.CreateDirectory(Path.Combine(root, "waiting"));
     }
-
-    // ---- capture / match helpers (from probe) ----
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
@@ -277,7 +349,6 @@ public sealed class HaranUiMatchService : IDisposable
             finally { g.ReleaseHdc(hdc); }
         }
 
-        // 若几乎全黑则屏幕拷贝整窗，再裁 ROI（仍比错误全黑强）
         if (IsMostlyBlack(full))
         {
             using var g2 = Graphics.FromImage(full);
@@ -298,7 +369,6 @@ public sealed class HaranUiMatchService : IDisposable
         else
             top = Math.Clamp(cfg.HaranRoiTop, 0, h - height);
 
-        // 优先：直接屏幕拷贝 ROI（更快）
         try
         {
             var roi = new Bitmap(width, height, PixelFormat.Format24bppRgb);
