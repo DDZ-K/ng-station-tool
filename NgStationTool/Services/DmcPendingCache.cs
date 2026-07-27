@@ -12,23 +12,19 @@ public sealed class PendingItem
     public string FolderKey { get; init; } = "";
 }
 
-/// <summary>NG DMC 待确认池：超时删除；无票 log 不执行。</summary>
+/// <summary>NG DMC 待确认池：有云端合法 log 才出队按键；无票 log 不执行。</summary>
 public sealed class DmcPendingCache
 {
     private readonly ConcurrentDictionary<string, PendingItem> _map =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly AppLogger _log;
-    private int _timeoutSec;
 
     public event Action? Changed;
 
-    public DmcPendingCache(AppLogger log, int timeoutSec)
+    public DmcPendingCache(AppLogger log)
     {
         _log = log;
-        _timeoutSec = Math.Max(1, timeoutSec);
     }
-
-    public void SetTimeoutSec(int sec) => _timeoutSec = Math.Max(1, sec);
 
     public int Count => _map.Count;
 
@@ -57,7 +53,7 @@ public sealed class DmcPendingCache
         };
         if (_map.TryAdd(dmc, item))
         {
-            _log.Info("缓存", $"入队 DMC={dmc} 文件夹组={fk} 来源={source} 超时={_timeoutSec}s");
+            _log.Info("缓存", $"入队 DMC={dmc} 文件夹组={fk} 来源={source}");
             Changed?.Invoke();
             return true;
         }
@@ -100,28 +96,6 @@ public sealed class DmcPendingCache
 
     public List<PendingItem> Snapshot()
         => _map.Values.OrderBy(v => v.EnqueuedAt).ToList();
-
-    /// <summary>清超时项；不按键。返回被清除的条目（含 FolderKey）。</summary>
-    public List<PendingItem> PurgeExpired()
-    {
-        var now = DateTime.Now;
-        var removed = new List<PendingItem>();
-        foreach (var kv in _map)
-        {
-            var age = (now - kv.Value.EnqueuedAt).TotalSeconds;
-            if (age >= _timeoutSec)
-            {
-                if (_map.TryRemove(kv.Key, out var item))
-                {
-                    removed.Add(item);
-                    _log.Warn("缓存",
-                        $"超时清除 DMC={kv.Key} 组={item.FolderKey} 已等待={age:F0}s（不按键，将尝试归档相关 log）");
-                }
-            }
-        }
-        if (removed.Count > 0) Changed?.Invoke();
-        return removed;
-    }
 
     public void ClearAll(string reason)
     {

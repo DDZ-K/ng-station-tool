@@ -8,9 +8,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>NgStationTool</AssemblyName>
     <RootNamespace>NgStationTool</RootNamespace>
-    <Version>1.0.0</Version>
-    <Product>工位图片与云端放行</Product>
-    <Description>图片复制命名 + 云端 log 小键盘放行（Win10）</Description>
+    <Version>1.5.0</Version>
+    <Product>NG 工位流转中心</Product>
+    <Description>图片 A/B 流转 + XML DMC 门控 + 云端 Log 按键放行（Win10）</Description>
     <LangVersion>latest</LangVersion>
         <ApplicationManifest>app.manifest</ApplicationManifest>
         <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

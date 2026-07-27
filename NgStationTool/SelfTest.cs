@@ -11,10 +11,16 @@ internal static class SelfTest
         var root = Path.Combine(Path.GetTempPath(), "ng-station-selftest-" + Guid.NewGuid().ToString("N")[..8]);
         var watch = Path.Combine(root, "watch");
         var output = Path.Combine(root, "out");
+        var judging = Path.Combine(root, "judging");
+        var reports = Path.Combine(root, "reports");
+        var reportArchive = Path.Combine(root, "report_archive");
         var logs = Path.Combine(root, "logs");
         var archive = Path.Combine(root, "logs_done");
         Directory.CreateDirectory(watch);
         Directory.CreateDirectory(output);
+        Directory.CreateDirectory(judging);
+        Directory.CreateDirectory(reports);
+        Directory.CreateDirectory(reportArchive);
         Directory.CreateDirectory(logs);
         Directory.CreateDirectory(archive);
 
@@ -25,6 +31,9 @@ internal static class SelfTest
             EnableCloudRelease = true,
             WatchRoot = watch,
             OutputRoot = output,
+            JudgingRoot = judging,
+            XmlWatchRoot = reports,
+            XmlArchiveRoot = reportArchive,
             NgImageRoot = output,
             CloudLogRoot = logs,
             CloudLogArchiveRoot = archive,
@@ -36,7 +45,6 @@ internal static class SelfTest
             SizeStableChecks = 2,
             RetryDelayMs = 40,
             DebounceMs = 50,
-            PendingTimeoutSec = 30,
             EnqueueFromImageCopyFolderName = true,
             EnqueueFromNgImageWatch = false, // 本测只测文件夹名入队，避免输出目录二次入队干扰
             LogReadyBudgetMs = 500,
@@ -50,20 +58,34 @@ internal static class SelfTest
         cfg.Save(cfgPath);
 
         var log = new AppLogger(Path.Combine(root, "test_log.txt"), 200);
-        var cache = new DmcPendingCache(log, cfg.PendingTimeoutSec);
+        var cache = new DmcPendingCache(log);
+        var ngQueue = new NgPendingQueue(log);
         var kb = new KeyboardService(log);
         AppConfig live = cfg;
         var cloud = new CloudReleaseService(log, () => live, cache, kb);
+        var xmlGate = new XmlDmcGateService(log, () => live, ngQueue, (name, path, productDmc) =>
+            cloud.EnqueueDmc(name, "XmlMatched", path, productDmc));
         var img = new ImageCopyWatcher(log, () => live, (renamed, path, folder) =>
         {
-            cloud.EnqueueDmc(renamed, "ImageCopyRenamed", path, folder);
+            ngQueue.Enqueue(renamed, folder, path);
         });
 
         var fail = 0;
         try
         {
+            // UI 生命周期契约：普通关闭只收起托盘；托盘“退出”才真正结束。
+            if (!TrayClosePolicy.ShouldMinimizeToTray(CloseReason.UserClosing, explicitExitRequested: false)
+                || !TrayClosePolicy.ShouldMinimizeToTray(CloseReason.None, explicitExitRequested: false)
+                || TrayClosePolicy.ShouldMinimizeToTray(CloseReason.UserClosing, explicitExitRequested: true))
+            {
+                Console.WriteLine("FAIL: tray close policy");
+                fail++;
+            }
+            else Console.WriteLine("PASS: tray close policy");
+
             img.Start();
             cloud.Start();
+            xmlGate.Start();
             Thread.Sleep(800);
 
             // 1) 同夹写入 2 张图 → 静默后整夹一次拷贝，入 2 条 DMC
@@ -86,8 +108,8 @@ internal static class SelfTest
             Thread.Sleep(80);
             File.WriteAllBytes(jpg2, buf);
 
-            var expected1 = dmc + "_cam";
-            var expected2 = dmc + "_cam2";
+            var expected1 = dmc + "_cam" + (cfg.AppendDateToFileName ? "_" + DateTime.Now.ToString(cfg.FileNameDateFormat) : "");
+            var expected2 = dmc + "_cam2" + (cfg.AppendDateToFileName ? "_" + DateTime.Now.ToString(cfg.FileNameDateFormat) : "");
             var deadline = DateTime.Now.AddSeconds(12);
             var copied = 0;
             while (DateTime.Now < deadline)
@@ -95,7 +117,7 @@ internal static class SelfTest
                 if (Directory.Exists(output))
                     copied = Directory.EnumerateFiles(output, "*", SearchOption.AllDirectories)
                         .Count(f => Path.GetFileName(f).StartsWith(dmc + "_", StringComparison.OrdinalIgnoreCase));
-                if (copied >= 2 && cache.Contains(expected1) && cache.Contains(expected2)) break;
+                if (copied >= 2 && ngQueue.Count == 2) break;
                 Thread.Sleep(100);
             }
 
@@ -106,13 +128,45 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: batch copied 2 images");
 
-            if (!cache.Contains(expected1) || !cache.Contains(expected2))
+            if (!ngQueue.Snapshot().Any(x => x.ImageName == expected1)
+                || !ngQueue.Snapshot().Any(x => x.ImageName == expected2))
             {
-                Console.WriteLine("FAIL: expected 2 DMCs, cache=" +
-                    string.Join(",", cache.Snapshot().Select(x => x.Dmc)));
+                Console.WriteLine("FAIL: expected 2 pending-NG images, queue=" +
+                    string.Join(",", ngQueue.Snapshot().Select(x => x.ImageName)));
                 fail++;
             }
-            else Console.WriteLine("PASS: two renamed DMCs in cache");
+            else Console.WriteLine("PASS: two renamed images in pending-NG queue");
+
+            // XML identifier 命中产品文件夹名：A 中整组图片移到 B/年/月/日，并转入待判断队列
+            var matchedXml = Path.Combine(reports, "matched.xml");
+            File.WriteAllText(matchedXml,
+                $"<?xml version=\"1.0\"?><root><event><partReceived identifier=\"{dmc}\" /></event></root>");
+            deadline = DateTime.Now.AddSeconds(8);
+            while (DateTime.Now < deadline && (ngQueue.Count != 0 || cache.Count != 2)) Thread.Sleep(100);
+            var judgingFiles = Directory.Exists(judging)
+                ? Directory.EnumerateFiles(judging, "*", SearchOption.AllDirectories).ToList()
+                : new List<string>();
+            if (ngQueue.Count != 0 || !cache.Contains(expected1) || !cache.Contains(expected2)
+                || judgingFiles.Count != 2 || File.Exists(matchedXml))
+            {
+                Console.WriteLine($"FAIL: XML matched gate ng={ngQueue.Count} judging={cache.Count} filesB={judgingFiles.Count}");
+                fail++;
+            }
+            else Console.WriteLine("PASS: XML identifier moved A to dated B and promoted queue");
+
+            var unmatchedXml = Path.Combine(reports, "unmatched.xml");
+            File.WriteAllText(unmatchedXml,
+                "<?xml version=\"1.0\"?><root><event><partReceived identifier=\"NOT_IN_QUEUE\" /></event></root>");
+            deadline = DateTime.Now.AddSeconds(5);
+            while (DateTime.Now < deadline && File.Exists(unmatchedXml)) Thread.Sleep(100);
+            var archivedMatched = Directory.EnumerateFiles(reportArchive, "matched.xml", SearchOption.AllDirectories).Any();
+            var archivedUnmatched = Directory.EnumerateFiles(reportArchive, "unmatched.xml", SearchOption.AllDirectories).Any();
+            if (!archivedMatched || !archivedUnmatched)
+            {
+                Console.WriteLine("FAIL: XML reports must archive into matched/unmatched folders");
+                fail++;
+            }
+            else Console.WriteLine("PASS: matched and unmatched XML reports archived");
 
             // 1b) 单张文件夹：只 1 张图也必须拷贝+入队（回归：单张不行）
             cache.ForceRemove(expected1, "selftest single prep");
@@ -123,12 +177,12 @@ internal static class SelfTest
             Thread.Sleep(150);
             var soloJpg = Path.Combine(subSolo, "only.jpg");
             File.WriteAllBytes(soloJpg, buf);
-            var expectedSolo = dmcSolo + "_only";
+            var expectedSolo = dmcSolo + "_only" + (cfg.AppendDateToFileName ? "_" + DateTime.Now.ToString(cfg.FileNameDateFormat) : "");
             deadline = DateTime.Now.AddSeconds(12);
             var soloOk = false;
             while (DateTime.Now < deadline)
             {
-                if (cache.Contains(expectedSolo)
+                if (ngQueue.Snapshot().Any(x => x.ImageName == expectedSolo)
                     && Directory.EnumerateFiles(output, "*", SearchOption.AllDirectories)
                         .Any(f => Path.GetFileNameWithoutExtension(f)
                             .Equals(expectedSolo, StringComparison.OrdinalIgnoreCase)))
@@ -141,13 +195,13 @@ internal static class SelfTest
             if (!soloOk)
             {
                 Console.WriteLine("FAIL: single-image folder must copy+enqueue, cache=" +
-                    string.Join(",", cache.Snapshot().Select(x => x.Dmc)));
+                    string.Join(",", ngQueue.Snapshot().Select(x => x.ImageName)));
                 fail++;
             }
             else Console.WriteLine("PASS: single-image folder enqueued");
 
             // 1c) 同大小已存在时：重写源图时间戳后仍应再入队（不要求再拷一份）
-            cache.ForceRemove(expectedSolo, "selftest same-size prep");
+            ngQueue.Remove(expectedSolo);
             Thread.Sleep(200);
             // 覆盖写入 → LastWriteTime 变新
             File.WriteAllBytes(soloJpg, buf);
@@ -156,7 +210,7 @@ internal static class SelfTest
             var requeueOk = false;
             while (DateTime.Now < deadline)
             {
-                if (cache.Contains(expectedSolo)) { requeueOk = true; break; }
+                if (ngQueue.Snapshot().Any(x => x.ImageName == expectedSolo)) { requeueOk = true; break; }
                 Thread.Sleep(100);
             }
             if (!requeueOk)
@@ -170,7 +224,7 @@ internal static class SelfTest
             img.Stop();
             cache.ForceRemove(expected1, "selftest gate");
             cache.ForceRemove(expected2, "selftest gate");
-            cache.ForceRemove(expectedSolo, "selftest gate");
+            ngQueue.Remove(expectedSolo);
             Thread.Sleep(200);
             var orphanLog = Path.Combine(logs, expected1 + ".log");
             File.WriteAllText(orphanLog, "ERER\nResult=OK\n");
@@ -268,22 +322,11 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: log archived or consumed");
 
-            // 5) 超时清除
-            cache.TryEnqueue("TIMEOUTX", "selftest", null, folderKey: "T");
-            cache.SetTimeoutSec(1);
-            Thread.Sleep(1500);
-            cache.PurgeExpired();
-            if (cache.Contains("TIMEOUTX"))
-            {
-                Console.WriteLine("FAIL: timeout purge");
-                fail++;
-            }
-            else Console.WriteLine("PASS: timeout purge");
         }
         finally
         {
-            try { img.Stop(); cloud.Stop(); } catch { /* ignore */ }
-            try { img.Dispose(); cloud.Dispose(); } catch { /* ignore */ }
+            try { img.Stop(); xmlGate.Stop(); cloud.Stop(); } catch { /* ignore */ }
+            try { img.Dispose(); xmlGate.Dispose(); cloud.Dispose(); } catch { /* ignore */ }
             try { Directory.Delete(root, true); } catch { /* ignore */ }
         }
 

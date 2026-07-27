@@ -12,7 +12,15 @@ public sealed class AppConfig
 
     // ---- 图片复制命名（兼容原 PS 脚本）----
     public string WatchRoot { get; set; } = @"E:\Download\AI\Test";
-    public string OutputRoot { get; set; } = @"E:\Download\AI\TestOut";
+    /// <summary>A 目录：图片改名后先进入这里，等待 XML identifier。</summary>
+    public string OutputRoot { get; set; } = @"E:\Download\AI\TestA";
+    /// <summary>B 目录：XML 匹配后移入，并按年/月/日归档。</summary>
+    public string JudgingRoot { get; set; } = @"E:\Download\AI\TestB";
+    /// <summary>设备 XML 报文监控目录。</summary>
+    public string XmlWatchRoot { get; set; } = @"E:\Download\AI\Test";
+    /// <summary>报文归档根目录，下分“已匹配/未匹配”。</summary>
+    public string XmlArchiveRoot { get; set; } = @"E:\Download\AI\Test\报文归档";
+    public int XmlReadyBudgetMs { get; set; } = 2000;
     public List<string> ImageExtensions { get; set; } = new()
     {
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"
@@ -57,8 +65,6 @@ public sealed class AppConfig
     public string DmcFromImage { get; set; } = "FileStem";
     /// <summary>FileStem=log 文件名去扩展名。</summary>
     public string DmcFromLog { get; set; } = "FileStem";
-    /// <summary>从有缓存到完成判定的超时（秒）。超时只清缓存，不按键。</summary>
-    public int PendingTimeoutSec { get; set; } = 120;
     /// <summary>是否监视 NG 图目录进缓存。默认 false：推荐只用「复制成功后子文件夹名=DMC」入队，避免 OutputRoot 与 NgImage 相同导致改名图二次入缓存。</summary>
     public bool EnqueueFromNgImageWatch { get; set; } = false;
     /// <summary>图片复制成功后是否把「改名后完整文件名（无扩展名）」作为 DMC 入缓存。</summary>
@@ -67,7 +73,7 @@ public sealed class AppConfig
     public bool EnterAfterFolderAllDone { get; set; } = true;
     /// <summary>整夹确认键，默认 Enter。</summary>
     public string ConfirmEnterKey { get; set; } = "Enter";
-    /// <summary>最后一张 9/7 之后，延迟多久再按回车（ms）。HARAN 常需要消化最后一键。</summary>
+    /// <summary>最后一张 9/7 之后，延迟多久再按回车（ms）。</summary>
     public int EnterAfterLastKeyDelayMs { get; set; } = 500;
     /// <summary>回车连按次数（默认 1；个别机台可设 2）。</summary>
     public int EnterRepeatCount { get; set; } = 1;
@@ -86,44 +92,6 @@ public sealed class AppConfig
     public bool AutoStartOnLaunch { get; set; } = false;
     public int MaxLogLines { get; set; } = 500;
     public int UiRefreshMs { get; set; } = 500;
-
-    // ---- HARAN 界面就绪门闩（Waiting for Input）----
-    /// <summary>启用后：图片先暂存改名，匹配到 Waiting 再进 Out；可选限制按键。</summary>
-    public bool EnableHaranUiGate { get; set; } = false;
-    /// <summary>为 true 时仅在 Waiting 状态才允许模拟按键。</summary>
-    public bool HaranGateKeys { get; set; } = true;
-    public string HaranWindowTitleFilter { get; set; } = "HARAN;Repair Station;Semi-automatic";
-    /// <summary>模板根目录（下含 idle/ waiting/）</summary>
-    public string HaranTemplateRoot { get; set; } = "";
-    public int HaranPollMs { get; set; } = 300;
-    public double HaranMinScore { get; set; } = 0.86;
-    /// <summary>连续多少帧一致才切换状态（防闪）</summary>
-    public int HaranStableFrames { get; set; } = 2;
-    /// <summary>判 Waiting 时 wait 分至少比 idle 高多少（防两态底栏太像）。</summary>
-    public double HaranWaitOverIdleMargin { get; set; } = 0.05;
-    public bool HaranRoiFromBottom { get; set; } = true;
-    public int HaranRoiBottomOffset { get; set; } = 0;
-    public int HaranRoiLeft { get; set; } = 0;
-    public int HaranRoiTop { get; set; } = 0;
-    /// <summary>0=铺满到右边</summary>
-    public int HaranRoiWidth { get; set; } = 0;
-    public int HaranRoiHeight { get; set; } = 48;
-    /// <summary>A/B 重叠时只串行一个文件夹组：前组结束并离开 Waiting 后再开下一组。</summary>
-    public bool HaranSerialSessions { get; set; } = true;
-    /// <summary>离开 Waiting 后，再过多久才允许下一组会话（ms）。</summary>
-    public int HaranNextSessionDelayMs { get; set; } = 500;
-    /// <summary>
-    /// 组结束后等界面离开 Waiting 的最长等待（ms）。0=一直等离开；
-    /// 产线若连续 Waiting 不闪断，建议 3000～10000 作兜底，避免下一组暂存永久卡死。
-    /// </summary>
-    public int HaranLeaveWaitTimeoutMs { get; set; } = 5000;
-
-    public string ResolvedHaranTemplateRoot()
-    {
-        if (!string.IsNullOrWhiteSpace(HaranTemplateRoot))
-            return HaranTemplateRoot;
-        return Path.Combine(AppContext.BaseDirectory, "haran-templates");
-    }
 
     public static string DefaultPath
     {
@@ -144,11 +112,7 @@ public sealed class AppConfig
                 var json = File.ReadAllText(path);
                 var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts());
                 if (cfg != null)
-                {
-                    if (string.IsNullOrWhiteSpace(cfg.HaranTemplateRoot))
-                        cfg.HaranTemplateRoot = cfg.ResolvedHaranTemplateRoot();
                     return cfg;
-                }
             }
         }
         catch

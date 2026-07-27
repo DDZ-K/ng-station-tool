@@ -4,29 +4,14 @@ using System.Diagnostics;
 namespace NgStationTool.Services;
 
 /// <summary>
-/// 一级子目录图片 → 等文件夹静默后整夹改名；
-/// 若启用 HARAN 门闩且当前非 Waiting：先暂存，不进 OutputRoot、不入 DMC；
-/// 匹配到 Waiting 后再 Flush 到 OutputRoot 并入 DMC。
+/// 一级子目录图片 → 等文件夹静默后整夹改名复制到 OutputRoot，并按配置入 DMC。
 /// </summary>
 public sealed class ImageCopyWatcher : IDisposable
 {
     private readonly AppLogger _log;
     private readonly Func<AppConfig> _cfg;
     private readonly Action<string, string, string>? _onCopiedRenamedDmc; // renamedStem, outputPath, folderKey
-    private readonly Func<bool>? _canOutputToOut; // null/true=可出 out；false=暂存
 
-    private sealed class StagedFile
-    {
-        public string SourcePath = "";
-        public string TargetFileName = "";
-        public long Length;
-        public long ReadyMs;
-        public string FolderName = "";
-        public DateTime DayHint = DateTime.Now;
-    }
-
-    private readonly ConcurrentQueue<StagedFile> _staged = new();
-    private readonly object _flushLock = new();
     /// <summary>
     /// 源路径 → 已成功处理时的 LastWriteTimeUtc.Ticks。
     /// </summary>
@@ -42,21 +27,15 @@ public sealed class ImageCopyWatcher : IDisposable
 
     public bool IsRunning => Volatile.Read(ref _running) == 1;
     public string? LastError { get; private set; }
-    public int StagedCount => _staged.Count;
-
-    /// <summary>整夹已改名入暂存后触发（用于立刻尝试 Waiting Flush，不单靠轮询上升沿）。</summary>
-    public event Action<string, int>? StagedBatchReady;
 
     public ImageCopyWatcher(
         AppLogger log,
         Func<AppConfig> cfg,
-        Action<string, string, string>? onCopiedRenamedDmc = null,
-        Func<bool>? canOutputToOut = null)
+        Action<string, string, string>? onCopiedRenamedDmc = null)
     {
         _log = log;
         _cfg = cfg;
         _onCopiedRenamedDmc = onCopiedRenamedDmc;
-        _canOutputToOut = canOutputToOut;
     }
 
     public void Start()
@@ -348,51 +327,9 @@ public sealed class ImageCopyWatcher : IDisposable
             return;
         }
 
-        // 3) 门闩开：一律先暂存改名，再按 Waiting 输出；门闩关：直接出 Out
-        var cfgGate = cfg.EnableHaranUiGate;
-        if (cfgGate)
-        {
-            _log.Info("图片",
-                $"整夹就绪 → 先暂存改名（门闩）| 文件夹={folderName} 张数={readyFiles.Count}");
-            foreach (var item in readyFiles)
-            {
-                try
-                {
-                    if (!File.Exists(item.path)) continue;
-                    if (IsSameWriteAlreadyHandled(item.path)) continue;
-                    var targetName = BuildRenamedFileName(cfg, folderName, item.path);
-                    _staged.Enqueue(new StagedFile
-                    {
-                        SourcePath = item.path,
-                        TargetFileName = targetName,
-                        Length = item.length,
-                        ReadyMs = item.readyMs,
-                        FolderName = folderName,
-                        DayHint = DateTime.Now
-                    });
-                    MarkHandled(item.path);
-                }
-                catch (Exception ex)
-                {
-                    _log.Error("图片", $"暂存失败 {item.path}: {ex.Message}");
-                }
-            }
-            _log.Success("图片", $"整夹已暂存 文件夹={folderName} 暂存队列={_staged.Count}");
-
-            try { StagedBatchReady?.Invoke(folderName, readyFiles.Count); }
-            catch (Exception ex) { _log.Warn("图片", "StagedBatchReady 回调: " + ex.Message); }
-
-            // 若当前已是 Waiting：不在此处直接 Flush（会话串行由协调器处理）；
-            // 但会通过 StagedBatchReady 立刻触发协调器，避免只等下一轮轮询。
-            var waitingNow = _canOutputToOut?.Invoke() ?? false;
-            if (waitingNow)
-                _log.Info("图片", "当前已是 Waiting → 暂存已入队，已通知会话协调器尝试输出");
-            else
-                _log.Info("图片", "当前非 Waiting → 等待界面匹配到 Waiting for Input 再输出");
-            return;
-        }
-
-        var dayDir = GetOutputDayDirectory(cfg, readyFiles[0].path);
+        // 3) 直接出 Out 并入 DMC
+        // A 是待报文确认暂存目录，不按日期分层；只有 B 按年月日归档。
+        var dayDir = cfg.OutputRoot;
         Directory.CreateDirectory(dayDir);
 
         _log.Info("图片", $"整夹开始拷贝 文件夹={folderName} 张数={readyFiles.Count} → {dayDir}");
@@ -400,15 +337,12 @@ public sealed class ImageCopyWatcher : IDisposable
         var okCount = 0;
         var dmcList = new List<string>();
         var swAll = Stopwatch.StartNew();
-
         foreach (var item in readyFiles)
         {
             var path = item.path;
             try
             {
-                if (!File.Exists(path)) continue;
-                if (IsSameWriteAlreadyHandled(path)) continue;
-
+                if (!File.Exists(path) || IsSameWriteAlreadyHandled(path)) continue;
                 if (!FileReady.IsUnlocked(path) || !FileReady.HasImageMagic(path))
                 {
                     _log.Skip("图片", $"拷贝前复查失败: {path}");
@@ -434,120 +368,6 @@ public sealed class ImageCopyWatcher : IDisposable
             $"整夹完成 文件夹={folderName} 成功={okCount}/{readyFiles.Count} " +
             $"耗时={swAll.ElapsedMilliseconds}ms DMC数={dmcList.Count} " +
             (dmcList.Count > 0 ? ("[" + string.Join(", ", dmcList) + "]") : ""));
-    }
-
-    /// <summary>HARAN 进入/持续 Waiting 时：输出暂存。onlyFolder 非空时只输出该文件夹组，其余仍留在暂存。</summary>
-    public int FlushStagedToOutput(string? onlyFolder = null)
-    {
-        lock (_flushLock)
-        {
-            var cfg = _cfg();
-            var list = new List<StagedFile>();
-            while (_staged.TryDequeue(out var s))
-                list.Add(s);
-            if (list.Count == 0) return 0;
-
-            List<StagedFile> toFlush;
-            if (string.IsNullOrWhiteSpace(onlyFolder))
-            {
-                toFlush = list;
-            }
-            else
-            {
-                var key = onlyFolder.Trim();
-                toFlush = list.Where(x =>
-                    string.Equals(x.FolderName, key, StringComparison.OrdinalIgnoreCase)).ToList();
-                foreach (var keep in list.Where(x =>
-                             !string.Equals(x.FolderName, key, StringComparison.OrdinalIgnoreCase)))
-                    _staged.Enqueue(keep);
-                if (toFlush.Count == 0)
-                {
-                    _log.Info("图片", $"会话组={key} 暂存中无该组图片（总暂存其余仍排队）");
-                    return 0;
-                }
-            }
-
-            _log.Info("图片",
-                string.IsNullOrWhiteSpace(onlyFolder)
-                    ? $"Waiting 触发：输出全部暂存 数量={toFlush.Count}"
-                    : $"Waiting 触发：仅输出会话组={onlyFolder} 数量={toFlush.Count}（其它组继续排队）");
-            var n = 0;
-            foreach (var item in toFlush)
-            {
-                try
-                {
-                    if (!File.Exists(item.SourcePath))
-                    {
-                        _log.Skip("图片", $"暂存源已不存在: {item.SourcePath}");
-                        continue;
-                    }
-                    var dayDir = GetOutputDayDirectory(cfg, item.SourcePath);
-                    Directory.CreateDirectory(dayDir);
-                    if (!TryCopyOne(cfg, item.SourcePath, item.Length, item.ReadyMs, item.FolderName, dayDir,
-                            item.TargetFileName, out var outPath, out var stem, alreadyMarked: true))
-                        continue;
-                    n++;
-                    if (cfg.EnableCloudRelease && cfg.EnqueueFromImageCopyFolderName)
-                        _onCopiedRenamedDmc?.Invoke(stem, outPath, item.FolderName);
-                }
-                catch (Exception ex)
-                {
-                    _log.Error("图片", $"暂存输出失败 {item.SourcePath}: {ex.Message}");
-                }
-            }
-            _log.Success("图片", $"暂存输出完成 成功={n}/{toFlush.Count} 剩余暂存={_staged.Count}");
-            return n;
-        }
-    }
-
-    /// <summary>暂存队列中最早出现的文件夹名（FIFO），无则 null。</summary>
-    public string? PeekFirstStagedFolder()
-    {
-        lock (_flushLock)
-        {
-            // ConcurrentQueue 无安全枚举快照：暂出再入
-            var list = new List<StagedFile>();
-            while (_staged.TryDequeue(out var s))
-                list.Add(s);
-            foreach (var s in list)
-                _staged.Enqueue(s);
-            return list.Select(x => x.FolderName).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
-        }
-    }
-
-    /// <summary>暂存中是否仍有指定文件夹组。</summary>
-    public bool HasStagedFolder(string folderName)
-    {
-        folderName = (folderName ?? "").Trim();
-        if (folderName.Length == 0) return false;
-        lock (_flushLock)
-        {
-            var list = new List<StagedFile>();
-            while (_staged.TryDequeue(out var s))
-                list.Add(s);
-            foreach (var s in list)
-                _staged.Enqueue(s);
-            return list.Any(x => string.Equals(x.FolderName, folderName, StringComparison.OrdinalIgnoreCase));
-        }
-    }
-
-    /// <summary>自检/仿真：直接把已就绪源图放入暂存队列（不经监视器）。</summary>
-    public void EnqueueStagedForTest(string folderName, string sourcePath, string targetFileName)
-    {
-        lock (_flushLock)
-        {
-            long len = 0;
-            try { if (File.Exists(sourcePath)) len = new FileInfo(sourcePath).Length; } catch { /* */ }
-            _staged.Enqueue(new StagedFile
-            {
-                SourcePath = sourcePath,
-                TargetFileName = targetFileName,
-                Length = len,
-                ReadyMs = 0,
-                FolderName = folderName,
-                DayHint = DateTime.Now
-            });
-        }
     }
 
     /// <summary>

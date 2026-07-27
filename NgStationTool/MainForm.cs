@@ -6,467 +6,267 @@ public sealed class MainForm : Form
 {
     private AppConfig _cfg;
     private readonly AppLogger _log;
-    private readonly DmcPendingCache _cache;
+    private readonly NgPendingQueue _ngQueue;
+    private readonly DmcPendingCache _judgingQueue;
     private readonly KeyboardService _keyboard;
     private readonly ImageCopyWatcher _imageWatcher;
+    private readonly XmlDmcGateService _xmlGate;
     private readonly CloudReleaseService _cloud;
-    private readonly HaranUiMatchService _haran;
-    private readonly JudgmentSessionCoordinator _session;
     private readonly System.Windows.Forms.Timer _uiTimer;
-
-    private readonly Label _lblStatus;
-    private readonly ListView _lvCache;
-    private readonly ListBox _lstLog;
-    private readonly Button _btnStart;
-    private readonly Button _btnStop;
-    private readonly Button _btnConfig;
-    private readonly Button _btnClearCache;
-    private readonly Button _btnTestOk;
-    private readonly Button _btnTestNok;
+    private readonly Label _status;
+    private readonly Label _ngCount;
+    private readonly Label _judgingCount;
+    private readonly ListView _ngList;
+    private readonly ListView _judgingList;
+    private readonly ListBox _logs;
+    private readonly Button _start;
+    private readonly Button _stop;
     private readonly NotifyIcon _tray;
-    private readonly CheckBox _chkTop;
+    private bool _explicitExitRequested;
+    private bool _cleaned;
+
+    private static readonly Color Bg = Color.FromArgb(244, 247, 250);
+    private static readonly Color Ink = Color.FromArgb(31, 41, 55);
+    private static readonly Color Muted = Color.FromArgb(100, 116, 139);
+    private static readonly Color Blue = Color.FromArgb(37, 99, 235);
+    private static readonly Color Green = Color.FromArgb(22, 163, 74);
 
     public MainForm()
     {
         _cfg = AppConfig.Load();
-        if (string.IsNullOrWhiteSpace(_cfg.HaranTemplateRoot))
-            _cfg.HaranTemplateRoot = _cfg.ResolvedHaranTemplateRoot();
-        var logPath = Path.Combine(AppContext.BaseDirectory, "station_log.txt");
-        _log = new AppLogger(logPath, _cfg.MaxLogLines);
-        _cache = new DmcPendingCache(_log, _cfg.PendingTimeoutSec);
+        _log = new AppLogger(Path.Combine(AppContext.BaseDirectory, "station_log.txt"), _cfg.MaxLogLines);
+        _ngQueue = new NgPendingQueue(_log);
+        _judgingQueue = new DmcPendingCache(_log);
         _keyboard = new KeyboardService(_log);
-        // needMatch 稍后绑定（依赖 _imageWatcher/_session/_cache）
-        JudgmentSessionCoordinator? sessionRef = null;
-        ImageCopyWatcher? imgRef = null;
-        DmcPendingCache cacheRef = _cache;
-        _haran = new HaranUiMatchService(_log, () => _cfg, () =>
-        {
-            if (!_cfg.EnableHaranUiGate) return false;
-            // 1) 有改名暂存图  2) 判定会话中/等离开Waiting  3) DMC 缓存待按键
-            if (imgRef != null && imgRef.StagedCount > 0) return true;
-            if (sessionRef != null && sessionRef.HasActiveSession) return true;
-            if (cacheRef.Count > 0) return true;
-            return false;
-        });
-        _session = new JudgmentSessionCoordinator(_log, () => _cfg);
-        sessionRef = _session;
-        _cloud = new CloudReleaseService(_log, () => _cfg, _cache, _keyboard, () =>
-        {
-            if (!_cfg.EnableHaranUiGate || !_cfg.HaranGateKeys) return true;
-            return _haran.IsWaiting;
-        });
+        _cloud = new CloudReleaseService(_log, () => _cfg, _judgingQueue, _keyboard);
+        _xmlGate = new XmlDmcGateService(_log, () => _cfg, _ngQueue,
+            (imageName, path, productDmc) => _cloud.EnqueueDmc(imageName, "XmlMatched", path, productDmc));
         _imageWatcher = new ImageCopyWatcher(_log, () => _cfg,
-            (renamedDmc, path, folderKey) =>
-            {
-                if (_cfg.EnableCloudRelease && _cfg.EnqueueFromImageCopyFolderName)
-                    _cloud.EnqueueDmc(renamedDmc, "ImageCopyRenamed", path, folderKey);
-            },
-            canOutputToOut: () =>
-            {
-                if (!_cfg.EnableHaranUiGate) return true;
-                return _haran.IsWaiting;
-            });
-        imgRef = _imageWatcher;
+            (imageName, path, productDmc) => _ngQueue.Enqueue(imageName, productDmc, path));
 
-        void TryFlushBySession(string reason)
-                {
-                    try
-                    {
-                        if (_imageWatcher.StagedCount <= 0 && !_session.HasActiveSession) return;
-
-                        if (!_cfg.HaranSerialSessions)
-                        {
-                            var all = _imageWatcher.FlushStagedToOutput(null);
-                            if (all > 0)
-                                _log.Success("HARAN", $"{reason}：输出暂存 {all} 张（非串行）");
-                            else if (_imageWatcher.StagedCount > 0)
-                                _log.Warn("HARAN", $"{reason}：非串行 Flush=0 但暂存仍={_imageWatcher.StagedCount}");
-                            return;
-                        }
-
-                        // 空会话清理：活动组无暂存且无 DMC 时释放
-                                        var act = _session.ActiveFolder;
-                                        if (!string.IsNullOrEmpty(act)
-                                            && !_imageWatcher.HasStagedFolder(act)
-                                            && _cache.CountInFolder(act) == 0)
-                                        {
-                                            _session.TryReleaseOrphanSession(activeFolderStillStaged: null, pendingInActiveFolder: 0);
-                                        }
-
-                                        if (!_session.TryGetFolderToFlush(_imageWatcher.PeekFirstStagedFolder, out var folder, out var block))
-                                        {
-                                            if (_imageWatcher.StagedCount > 0 && !string.IsNullOrEmpty(block))
-                                                _session.LogBlockedThrottled(block!, _imageWatcher.StagedCount);
-                                            return;
-                                        }
-
-                                        var n = _imageWatcher.FlushStagedToOutput(folder);
-                                        if (n > 0)
-                                        {
-                                            _log.Success("HARAN",
-                                                $"{reason}：会话组={folder} 输出 {n} 张 | {_session.Describe()}");
-                                        }
-                                        else if (_imageWatcher.StagedCount > 0)
-                                        {
-                                            _log.Warn("HARAN",
-                                                $"{reason}：Flush=0 会话组={folder ?? "-"} 剩余暂存={_imageWatcher.StagedCount} | {_session.Describe()}");
-                                            // 活动组缓存已空且暂存也无该组 → 释放后重试下一组
-                                            if (!string.IsNullOrEmpty(folder)
-                                                && _cache.CountInFolder(folder) == 0
-                                                && !_imageWatcher.HasStagedFolder(folder))
-                                            {
-                                                _session.TryReleaseOrphanSession(null, 0);
-                                                if (_session.TryGetFolderToFlush(_imageWatcher.PeekFirstStagedFolder, out var folder2, out _))
-                                                {
-                                                    var n2 = _imageWatcher.FlushStagedToOutput(folder2);
-                                                    if (n2 > 0)
-                                                        _log.Success("HARAN",
-                                                            $"{reason}：重试会话组={folder2} 输出 {n2} 张");
-                                                }
-                                            }
-                                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error("HARAN", $"{reason} Flush 失败: " + ex.Message);
-                    }
-                }
-
-                _haran.EnteredWaiting += () => TryFlushBySession("进入Waiting");
-                _haran.StillWaiting += () => TryFlushBySession("Waiting持续");
-                _imageWatcher.StagedBatchReady += (folder, count) =>
-                {
-                    _log.Info("HARAN", $"收到暂存完成通知 组={folder} 张数={count} → 立即尝试输出");
-                    TryFlushBySession("暂存完成");
-                };
-                _haran.StateChanged += kind =>
-                {
-                    try { _session.OnHaranMatchKind(kind); }
-                    catch (Exception ex) { _log.Warn("会话", "状态回调: " + ex.Message); }
-                    // 离开 Waiting 后若有暂存，冷却结束后由持续轮询/下次 Waiting 再 Flush
-                    if (kind != HaranUiMatchService.MatchKind.Waiting)
-                        TryFlushBySession("界面非Waiting");
-                };
-        _cloud.FolderGroupFinished += (fk, reason) =>
-        {
-            try { _session.NotifyFolderGroupFinished(fk, reason, uiStillWaiting: _haran.IsWaiting); }
-            catch (Exception ex) { _log.Warn("会话", "组结束回调: " + ex.Message); }
-        };
-
-        Text = "工位工具 · 图片命名 + 云端放行 + HARAN门闩  v1.4.0";
-        Width = 980;
-        Height = 640;
+        Text = "NG 工位流转中心  v1.5.0";
+        Width = 1180;
+        Height = 760;
+        MinimumSize = new Size(960, 620);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Microsoft YaHei UI", 9F);
-        MinimumSize = new Size(800, 500);
+        BackColor = Bg;
 
-        _lblStatus = new Label
+        var header = new Panel { Dock = DockStyle.Top, Height = 78, BackColor = Color.White, Padding = new Padding(22, 14, 18, 10) };
+        var title = new Label { Text = "NG 工位流转中心", Font = new Font(Font.FontFamily, 16F, FontStyle.Bold), ForeColor = Ink, AutoSize = true, Left = 22, Top = 12 };
+        var subtitle = new Label { Text = "图片 → A 待NG → XML确认 → B 待判断 → Log放行", ForeColor = Muted, AutoSize = true, Left = 24, Top = 46 };
+        _start = Button("开始监控", Blue, 110);
+        _stop = Button("停止", Color.FromArgb(71, 85, 105), 86); _stop.Enabled = false;
+        var config = Button("配置", Color.FromArgb(15, 118, 110), 86);
+        var exit = Button("收起", Color.FromArgb(71, 85, 105), 76);
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 390, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = new Padding(0, 8, 0, 0) };
+        actions.Controls.AddRange(new Control[] { _start, _stop, config, exit });
+        header.Controls.AddRange(new Control[] { title, subtitle, actions });
+
+        _status = new Label { Dock = DockStyle.Top, Height = 38, BackColor = Color.FromArgb(226, 232, 240), ForeColor = Ink, Padding = new Padding(22, 10, 0, 0), Text = "已停止" };
+
+        var queues = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(16, 14, 16, 8) };
+        queues.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        queues.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        queues.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        _ngList = QueueList();
+        _ngList.ShowItemToolTips = true;
+        _ngList.Columns.Add("完整图片名", 340); _ngList.Columns.Add("产品DMC", 260); _ngList.Columns.Add("进入A", 90); _ngList.Columns.Add("A路径", 400);
+        _judgingList = QueueList();
+        _judgingList.ShowItemToolTips = true;
+        _judgingList.Columns.Add("完整图片名", 340); _judgingList.Columns.Add("产品DMC", 260); _judgingList.Columns.Add("进入B", 90); _judgingList.Columns.Add("B路径", 400);
+        _ngCount = new Label(); _judgingCount = new Label();
+        queues.Controls.Add(Card("待 NG 队列", "图片已进入 A，等待 XML identifier", _ngCount, _ngList, Color.FromArgb(234, 88, 12)), 0, 0);
+        queues.Controls.Add(Card("待判断队列", "XML 已匹配并进入 B，等待云端 Log", _judgingCount, _judgingList, Green), 0, 1);
+
+        _logs = new ListBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, BackColor = Color.FromArgb(15, 23, 42), ForeColor = Color.FromArgb(203, 213, 225), Font = new Font("Consolas", 9F), HorizontalScrollbar = true, IntegralHeight = false };
+        var logWrap = new Panel { Dock = DockStyle.Bottom, Height = 218, Padding = new Padding(18, 8, 18, 16), BackColor = Bg };
+        var logTitle = new Label { Text = "运行日志", Dock = DockStyle.Top, Height = 28, ForeColor = Ink, Font = new Font(Font.FontFamily, 10F, FontStyle.Bold) };
+        logWrap.Controls.Add(_logs); logWrap.Controls.Add(logTitle);
+
+        Controls.Add(queues); Controls.Add(logWrap); Controls.Add(_status); Controls.Add(header);
+
+        _start.Click += (_, _) => StartAll();
+        _stop.Click += (_, _) => StopAll();
+        config.Click += (_, _) => OpenConfig();
+        exit.Click += (_, _) => MinimizeToTray(showTip: true);
+        _ngQueue.Changed += RefreshAsync;
+        _judgingQueue.Changed += RefreshAsync;
+        _log.Logged += entry =>
         {
-            Dock = DockStyle.Top,
-            Height = 36,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(10, 0, 0, 0),
-            BackColor = Color.FromArgb(32, 40, 48),
-            ForeColor = Color.White,
-            Text = "状态: 已停止"
+            try { if (!IsDisposed) BeginInvoke(new Action(() => { _logs.Items.Add(entry.ToString()); while (_logs.Items.Count > _cfg.MaxLogLines) _logs.Items.RemoveAt(0); _logs.TopIndex = Math.Max(0, _logs.Items.Count - 1); })); } catch { }
         };
-
-        var topBar = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 44,
-            Padding = new Padding(8, 8, 8, 4),
-            WrapContents = false
-        };
-        _btnStart = new Button { Text = "开始", Width = 90, Height = 28 };
-        _btnStop = new Button { Text = "停止", Width = 90, Height = 28, Enabled = false };
-        _btnConfig = new Button { Text = "配置…", Width = 90, Height = 28 };
-        _btnClearCache = new Button { Text = "清空缓存", Width = 90, Height = 28 };
-        _btnTestOk = new Button { Text = "测试OK键", Width = 90, Height = 28 };
-        _btnTestNok = new Button { Text = "测试NOK键", Width = 100, Height = 28 };
-        _chkTop = new CheckBox { Text = "窗口置顶", AutoSize = true, Margin = new Padding(12, 6, 0, 0) };
-        topBar.Controls.AddRange(new Control[]
-        {
-            _btnStart, _btnStop, _btnConfig, _btnClearCache, _btnTestOk, _btnTestNok, _chkTop
-        });
-
-        var split = new SplitContainer
-        {
-            Dock = DockStyle.Fill,
-            Orientation = Orientation.Horizontal,
-            SplitterDistance = 220
-        };
-
-        _lvCache = new ListView
-        {
-            Dock = DockStyle.Fill,
-            View = View.Details,
-            FullRowSelect = true,
-            GridLines = true
-        };
-        _lvCache.Columns.Add("DMC(改名完整名)", 220);
-        _lvCache.Columns.Add("类型", 70);
-        _lvCache.Columns.Add("文件夹组", 110);
-        _lvCache.Columns.Add("同组剩余", 70);
-        _lvCache.Columns.Add("入队时间", 80);
-        _lvCache.Columns.Add("剩余秒", 55);
-        _lvCache.Columns.Add("来源", 90);
-        _lvCache.Columns.Add("输出图片路径", 260);
-        var cachePanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8) };
-        var cacheTitle = new Label
-        {
-            Text = "待确认 DMC：【单】=该夹仅1条  【多】=同夹多条 | 全组OK/NOK完才回车；有超时则不回车",
-            Dock = DockStyle.Top,
-            Height = 22
-        };
-        cachePanel.Controls.Add(_lvCache);
-        cachePanel.Controls.Add(cacheTitle);
-        split.Panel1.Controls.Add(cachePanel);
-
-        _lstLog = new ListBox
-        {
-            Dock = DockStyle.Fill,
-            HorizontalScrollbar = true,
-            IntegralHeight = false
-        };
-        var logPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8) };
-        var logTitle = new Label { Text = "运行日志", Dock = DockStyle.Top, Height = 22 };
-        logPanel.Controls.Add(_lstLog);
-        logPanel.Controls.Add(logTitle);
-        split.Panel2.Controls.Add(logPanel);
-
-        Controls.Add(split);
-        Controls.Add(topBar);
-        Controls.Add(_lblStatus);
-
+        _uiTimer = new System.Windows.Forms.Timer { Interval = Math.Max(300, _cfg.UiRefreshMs) };
+        _uiTimer.Tick += (_, _) => RefreshUi();
+        _uiTimer.Start();
         _tray = new NotifyIcon
         {
-            Text = "工位工具",
+            Text = "NG 工位流转中心",
+            Icon = SystemIcons.Application,
             Visible = true,
-            Icon = SystemIcons.Application
+            ContextMenuStrip = BuildTrayMenu()
         };
-        _tray.DoubleClick += (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); };
-
-        _btnStart.Click += (_, _) => StartAll();
-        _btnStop.Click += (_, _) => StopAll();
-        _btnConfig.Click += (_, _) => OpenConfig();
-        _btnClearCache.Click += (_, _) =>
-        {
-            _cache.ClearAll("用户清空");
-            RefreshCacheList();
-        };
-        _btnTestOk.Click += (_, _) => TestKey(_cfg.OkKey);
-        _btnTestNok.Click += (_, _) => TestKey(_cfg.NokKey);
-        _chkTop.CheckedChanged += (_, _) => TopMost = _chkTop.Checked;
-
-        _log.Logged += e =>
-        {
-            try
-            {
-                if (IsDisposed) return;
-                BeginInvoke(new Action(() =>
-                {
-                    _lstLog.Items.Add(e.ToString());
-                    while (_lstLog.Items.Count > _cfg.MaxLogLines)
-                        _lstLog.Items.RemoveAt(0);
-                    _lstLog.TopIndex = Math.Max(0, _lstLog.Items.Count - 1);
-                }));
-            }
-            catch { /* ignore */ }
-        };
-
-        _cache.Changed += () =>
-        {
-            try { if (!IsDisposed) BeginInvoke(RefreshCacheList); } catch { /* ignore */ }
-        };
-
-        _uiTimer = new System.Windows.Forms.Timer { Interval = Math.Max(200, _cfg.UiRefreshMs) };
-        _uiTimer.Tick += (_, _) =>
-        {
-            RefreshCacheList();
-            UpdateStatus();
-        };
-        _uiTimer.Start();
-
+        _tray.DoubleClick += (_, _) => RestoreFromTray();
+        Load += (_, _) => { _log.Info("系统", "程序启动 | 版本=v1.5.0"); if (_cfg.AutoStartOnLaunch) StartAll(); else RefreshUi(); };
         FormClosing += OnFormClosing;
-        Load += (_, _) =>
-        {
-            _log.Info("系统", "程序启动 Win10/net8 | 版本=v1.4.0 | 程序目录=" + AppContext.BaseDirectory + " | 配置=" + AppConfig.DefaultPath);
-            if (_cfg.AutoStartOnLaunch)
-                StartAll();
-            else
-                UpdateStatus();
-        };
+        Resize += (_, _) => { ResizeQueueColumns(_ngList); ResizeQueueColumns(_judgingList); };
+        Shown += (_, _) => { ResizeQueueColumns(_ngList); ResizeQueueColumns(_judgingList); };
+    }
+
+    private static Button Button(string text, Color color, int width) => new()
+    {
+        Text = text, Width = width, Height = 34, FlatStyle = FlatStyle.Flat, BackColor = color, ForeColor = Color.White,
+        Margin = new Padding(7, 0, 0, 0), Cursor = Cursors.Hand, FlatAppearance = { BorderSize = 0 }
+    };
+
+    private static ListView QueueList() => new()
+    {
+        Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = false,
+        BorderStyle = BorderStyle.None, BackColor = Color.White, ForeColor = Ink, HeaderStyle = ColumnHeaderStyle.Nonclickable
+    };
+
+    private static Panel Card(string title, string subtitle, Label count, ListView list, Color accent)
+    {
+        var p = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(16), Margin = new Padding(7) };
+        var top = new Panel { Dock = DockStyle.Top, Height = 58 };
+        var heading = new Label { Text = title, Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold), ForeColor = Ink, AutoSize = true, Left = 0, Top = 1 };
+        var hint = new Label { Text = subtitle, ForeColor = Muted, AutoSize = true, Left = 1, Top = 31 };
+        count.Text = "0"; count.Font = new Font("Segoe UI", 16F, FontStyle.Bold); count.ForeColor = accent; count.AutoSize = true; count.Anchor = AnchorStyles.Top | AnchorStyles.Right; count.Left = 500; count.Top = 7;
+        top.Resize += (_, _) => count.Left = top.ClientSize.Width - count.Width - 4;
+        top.Controls.AddRange(new Control[] { heading, hint, count }); p.Controls.Add(list); p.Controls.Add(top); return p;
     }
 
     private void StartAll()
     {
         try
         {
-            _cfg = AppConfig.Load(); // 重新读盘
-            if (string.IsNullOrWhiteSpace(_cfg.HaranTemplateRoot))
-                _cfg.HaranTemplateRoot = _cfg.ResolvedHaranTemplateRoot();
-            _cache.SetTimeoutSec(_cfg.PendingTimeoutSec);
+            _cfg = AppConfig.Load();
             _log.SetMaxLines(_cfg.MaxLogLines);
-            _session.Reset();
-            _haran.Start();
-            _imageWatcher.Start();
-            _cloud.Start();
-            _btnStart.Enabled = false;
-            _btnStop.Enabled = true;
-            UpdateStatus();
+            _imageWatcher.Start(); _xmlGate.Start(); _cloud.Start();
+            _start.Enabled = false; _stop.Enabled = true; RefreshUi();
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, ex.Message, "启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
     private void StopAll()
     {
-        _imageWatcher.Stop();
-        _cloud.Stop();
-        _haran.Stop();
-        _session.Reset();
-        _btnStart.Enabled = true;
-        _btnStop.Enabled = false;
-        UpdateStatus();
+        _imageWatcher.Stop(); _xmlGate.Stop(); _cloud.Stop();
+        if (!IsDisposed) { _start.Enabled = true; _stop.Enabled = false; RefreshUi(); }
     }
 
     private void OpenConfig()
     {
         using var dlg = new ConfigForm(_cfg);
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-        {
-            _cfg = dlg.Result;
-            _cfg.Save();
-            _cache.SetTimeoutSec(_cfg.PendingTimeoutSec);
-            _log.SetMaxLines(_cfg.MaxLogLines);
-            _log.Info("系统", "配置已保存。若已在运行，请停止后重新开始以应用目录监视变更。");
-            MessageBox.Show(this,
-                "配置已保存。\n监视目录等变更请点「停止」再「开始」。",
-                "配置", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        _cfg = dlg.Result; _cfg.Save(); _log.SetMaxLines(_cfg.MaxLogLines);
+        _log.Info("系统", "配置已保存；目录变更请停止后再开始。 ");
     }
 
-    private void TestKey(string key)
-    {
-        Task.Run(() =>
-        {
-            _log.Info("键盘", $"3 秒后测试发送 {key}，请点到目标窗口…");
-            Thread.Sleep(3000);
-            _keyboard.SendKey(key, 1, 50,
-                string.IsNullOrWhiteSpace(_cfg.TargetWindowTitleContains) ? null : _cfg.TargetWindowTitleContains,
-                string.IsNullOrWhiteSpace(_cfg.TargetProcessName) ? null : _cfg.TargetProcessName,
-                _cfg.ActivateWindowDelayMs);
-        });
-    }
+    private void RefreshAsync() { try { if (!IsDisposed) BeginInvoke(RefreshUi); } catch { } }
 
-    private void RefreshCacheList()
+    private void RefreshUi()
     {
         if (IsDisposed) return;
-        var items = _cache.Snapshot();
-        var timeout = Math.Max(5, _cfg.PendingTimeoutSec);
-        _lvCache.BeginUpdate();
-        try
-        {
-            _lvCache.Items.Clear();
-            // 统计同组数量
-            var groupCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            foreach (var it in items)
-            {
-                var fk = string.IsNullOrWhiteSpace(it.FolderKey) ? it.Dmc : it.FolderKey;
-                groupCount[fk] = groupCount.TryGetValue(fk, out var c) ? c + 1 : 1;
-            }
-
-            foreach (var it in items)
-            {
-                var left = timeout - (DateTime.Now - it.EnqueuedAt).TotalSeconds;
-                if (left < 0) left = 0;
-                var fk = string.IsNullOrWhiteSpace(it.FolderKey) ? it.Dmc : it.FolderKey;
-                var n = groupCount.TryGetValue(fk, out var gc) ? gc : 1;
-                var kind = n <= 1 ? "单" : $"多×{n}";
-
-                var lvi = new ListViewItem(it.Dmc);
-                lvi.SubItems.Add(kind);
-                lvi.SubItems.Add(it.FolderKey);
-                lvi.SubItems.Add(n.ToString());
-                lvi.SubItems.Add(it.EnqueuedAt.ToString("HH:mm:ss"));
-                lvi.SubItems.Add(((int)left).ToString());
-                lvi.SubItems.Add(it.Source);
-                lvi.SubItems.Add(it.SourcePath ?? "");
-
-                // 视觉区分：多条同组用浅橙底，单条浅绿底
-                if (n > 1)
-                {
-                    lvi.BackColor = Color.FromArgb(255, 244, 229);
-                    lvi.ForeColor = Color.FromArgb(120, 60, 0);
-                }
-                else
-                {
-                    lvi.BackColor = Color.FromArgb(232, 248, 237);
-                    lvi.ForeColor = Color.FromArgb(20, 70, 40);
-                }
-
-                _lvCache.Items.Add(lvi);
-            }
-        }
-        finally { _lvCache.EndUpdate(); }
+        var ng = _ngQueue.Snapshot(); var judging = _judgingQueue.Snapshot();
+        Fill(_ngList, ng.Select(x => new[] { x.ImageName, x.ProductDmc, x.EnqueuedAt.ToString("HH:mm:ss"), x.StagedPath }));
+        Fill(_judgingList, judging.Select(x => new[] { x.Dmc, x.FolderKey, x.EnqueuedAt.ToString("HH:mm:ss"), x.SourcePath ?? "" }));
+        _ngCount.Text = ng.Count.ToString(); _judgingCount.Text = judging.Count.ToString();
+        var running = _imageWatcher.IsRunning || _xmlGate.IsRunning || _cloud.IsRunning;
+        _status.Text = running
+            ? $"● 运行中    图片监听 ✓    XML报文 ✓    Log放行 ✓    待NG {ng.Count}    待判断 {judging.Count}"
+            : $"● 已停止    待NG {ng.Count}    待判断 {judging.Count}";
+        _status.ForeColor = running ? Green : Muted;
     }
 
-    private void UpdateStatus()
+    private static void Fill(ListView list, IEnumerable<string[]> rows)
     {
-        var img = _imageWatcher.IsRunning ? "图片✓" : "图片✗";
-        var cloud = _cloud.IsRunning ? "放行✓" : "放行✗";
-        var haran = !_cfg.EnableHaranUiGate
-            ? "HARAN门闩关"
-            : (_haran.IsRunning
-                ? (_haran.IsActivelyMatching
-                    ? $"HARAN={_haran.LastKind} 轮询中 暂存={_imageWatcher.StagedCount} {_session.Describe()}"
-                    : $"HARAN=待命(等改名暂存) 暂存={_imageWatcher.StagedCount} {_session.Describe()}")
-                : "HARAN✗");
-        var run = _imageWatcher.IsRunning || _cloud.IsRunning || _haran.IsRunning ? "运行中" : "已停止";
-        _lblStatus.Text =
-            $"状态: {run}  |  {img}  {cloud}  {haran}  |  缓存 {_cache.Count}  |  OK={_cfg.OkKey} NOK={_cfg.NokKey} 超时={_cfg.PendingTimeoutSec}s";
-        _lblStatus.BackColor = run == "运行中" ? Color.FromArgb(20, 90, 50) : Color.FromArgb(32, 40, 48);
+        list.BeginUpdate();
+        try
+        {
+            list.Items.Clear();
+            foreach (var cells in rows)
+            {
+                var row = new ListViewItem(cells[0]) { ToolTipText = $"完整图片名：{cells[0]}\n产品DMC：{cells[1]}\n路径：{cells[3]}" };
+                foreach (var cell in cells.Skip(1)) row.SubItems.Add(cell);
+                list.Items.Add(row);
+            }
+        }
+        finally { list.EndUpdate(); }
+    }
+
+    private ContextMenuStrip BuildTrayMenu()
+    {
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("打开主窗口", null, (_, _) => RestoreFromTray());
+        menu.Items.Add("开始监控", null, (_, _) => StartAll());
+        menu.Items.Add("停止监控", null, (_, _) => StopAll());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("退出程序", null, (_, _) => ExitApplication());
+        return menu;
+    }
+
+    private void MinimizeToTray(bool showTip)
+    {
+        Hide();
+        ShowInTaskbar = false;
+        if (showTip)
+            _tray.ShowBalloonTip(1500, "NG 工位流转中心", "程序已收起到右下角托盘，监控继续运行。", ToolTipIcon.Info);
+    }
+
+    private void RestoreFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+        BringToFront();
+    }
+
+    private void ExitApplication()
+    {
+        _explicitExitRequested = true;
+        Close();
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (e.CloseReason == CloseReason.UserClosing)
+        if (TrayClosePolicy.ShouldMinimizeToTray(e.CloseReason, _explicitExitRequested))
         {
             e.Cancel = true;
-            Hide();
-            _tray.ShowBalloonTip(1500, "工位工具", "已最小化到托盘，监视继续（若已开始）。右键托盘可退出。", ToolTipIcon.Info);
+            MinimizeToTray(showTip: true);
             return;
         }
         Cleanup();
     }
 
-    protected override void OnHandleCreated(EventArgs e)
+    protected override void WndProc(ref Message m)
     {
-        base.OnHandleCreated(e);
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("打开主窗口", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
-        menu.Items.Add("开始", null, (_, _) => StartAll());
-        menu.Items.Add("停止", null, (_, _) => StopAll());
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("退出", null, (_, _) =>
+        const int WmClose = 0x0010;
+        if (m.Msg == WmClose && !_explicitExitRequested && !_cleaned)
         {
-            Cleanup();
-            _tray.Visible = false;
-            Application.Exit();
-        });
-        _tray.ContextMenuStrip = menu;
+            MinimizeToTray(showTip: true);
+            return;
+        }
+        base.WndProc(ref m);
+    }
+
+    private static void ResizeQueueColumns(ListView list)
+    {
+        if (list.Columns.Count != 4 || list.ClientSize.Width <= 0) return;
+        var width = Math.Max(640, list.ClientSize.Width - 8);
+        list.Columns[2].Width = 90;
+        list.Columns[0].Width = Math.Max(220, (int)(width * 0.31));
+        list.Columns[1].Width = Math.Max(180, (int)(width * 0.24));
+        list.Columns[3].Width = Math.Max(240, width - list.Columns[0].Width - list.Columns[1].Width - list.Columns[2].Width);
     }
 
     private void Cleanup()
     {
-        try { _uiTimer.Stop(); } catch { /* ignore */ }
-        try { StopAll(); } catch { /* ignore */ }
-        try { _imageWatcher.Dispose(); } catch { /* ignore */ }
-        try { _cloud.Dispose(); } catch { /* ignore */ }
-        try { _haran.Dispose(); } catch { /* ignore */ }
-        try { _tray.Visible = false; _tray.Dispose(); } catch { /* ignore */ }
+        if (_cleaned) return;
+        _cleaned = true;
+        try { _uiTimer.Stop(); } catch { }
+        try { _imageWatcher.Stop(); _xmlGate.Stop(); _cloud.Stop(); } catch { }
+        try { _imageWatcher.Dispose(); _xmlGate.Dispose(); _cloud.Dispose(); } catch { }
+        try { _tray.Visible = false; _tray.Dispose(); } catch { }
     }
 }
