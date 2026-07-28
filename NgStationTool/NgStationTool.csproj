@@ -8,7 +8,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>NgStationTool</AssemblyName>
     <RootNamespace>NgStationTool</RootNamespace>
-    <Version>1.5.1</Version>
+    <Version>1.5.2</Version>
     <Product>NG 工位流转中心</Product>
     <Description>图片 A/B 流转 + XML DMC 门控 + 云端 Log 按键放行（Win10）</Description>
     <LangVersion>latest</LangVersion>

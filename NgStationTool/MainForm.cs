@@ -16,6 +16,8 @@ public sealed class MainForm : Form
     private readonly Label _status;
     private readonly Label _ngCount;
     private readonly Label _judgingCount;
+    private readonly Button _clearNg;
+    private readonly Button _clearJudging;
     private readonly ListView _ngList;
     private readonly ListView _judgingList;
     private readonly ListBox _logs;
@@ -30,6 +32,7 @@ public sealed class MainForm : Form
     private static readonly Color Muted = Color.FromArgb(100, 116, 139);
     private static readonly Color Blue = Color.FromArgb(37, 99, 235);
     private static readonly Color Green = Color.FromArgb(22, 163, 74);
+    private static readonly Color Danger = Color.FromArgb(185, 28, 28);
 
     public MainForm()
     {
@@ -44,7 +47,7 @@ public sealed class MainForm : Form
         _imageWatcher = new ImageCopyWatcher(_log, () => _cfg,
             (imageName, path, productDmc) => _ngQueue.Enqueue(imageName, productDmc, path));
 
-        Text = "NG 工位流转中心  v1.5.1";
+        Text = "NG 工位流转中心  v1.5.2";
         Width = 1180;
         Height = 760;
         MinimumSize = new Size(960, 620);
@@ -76,8 +79,12 @@ public sealed class MainForm : Form
         _judgingList.ShowItemToolTips = true;
         _judgingList.Columns.Add("完整图片名", 340); _judgingList.Columns.Add("产品DMC", 260); _judgingList.Columns.Add("进入B", 90); _judgingList.Columns.Add("B路径", 400);
         _ngCount = new Label(); _judgingCount = new Label();
-        queues.Controls.Add(Card("待 NG 队列", "图片已进入 A，等待 XML identifier", _ngCount, _ngList, Color.FromArgb(234, 88, 12)), 0, 0);
-        queues.Controls.Add(Card("待判断队列", "XML 已匹配并进入 B，等待云端 Log", _judgingCount, _judgingList, Green), 0, 1);
+        _clearNg = SmallButton("清空队列", Danger);
+        _clearJudging = SmallButton("清空队列", Danger);
+        _clearNg.Click += (_, _) => ClearNgQueue();
+        _clearJudging.Click += (_, _) => ClearJudgingQueue();
+        queues.Controls.Add(Card("待 NG 队列", "图片已进入 A，等待 XML identifier", _ngCount, _clearNg, _ngList, Color.FromArgb(234, 88, 12)), 0, 0);
+        queues.Controls.Add(Card("待判断队列", "XML 已匹配并进入 B，等待云端 Log", _judgingCount, _clearJudging, _judgingList, Green), 0, 1);
 
         _logs = new ListBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, BackColor = Color.FromArgb(15, 23, 42), ForeColor = Color.FromArgb(203, 213, 225), Font = new Font("Consolas", 9F), HorizontalScrollbar = true, IntegralHeight = false };
         var logWrap = new Panel { Dock = DockStyle.Bottom, Height = 218, Padding = new Padding(18, 8, 18, 16), BackColor = Bg };
@@ -107,7 +114,7 @@ public sealed class MainForm : Form
             ContextMenuStrip = BuildTrayMenu()
         };
         _tray.DoubleClick += (_, _) => RestoreFromTray();
-        Load += (_, _) => { _log.Info("系统", "程序启动 | 版本=v1.5.1"); if (_cfg.AutoStartOnLaunch) StartAll(); else RefreshUi(); };
+        Load += (_, _) => { _log.Info("系统", "程序启动 | 版本=v1.5.2"); if (_cfg.AutoStartOnLaunch) StartAll(); else RefreshUi(); };
         FormClosing += OnFormClosing;
         Resize += (_, _) => { ResizeQueueColumns(_ngList); ResizeQueueColumns(_judgingList); };
         Shown += (_, _) => { ResizeQueueColumns(_ngList); ResizeQueueColumns(_judgingList); };
@@ -119,21 +126,83 @@ public sealed class MainForm : Form
         Margin = new Padding(7, 0, 0, 0), Cursor = Cursors.Hand, FlatAppearance = { BorderSize = 0 }
     };
 
+    private static Button SmallButton(string text, Color color) => new()
+    {
+        Text = text, Width = 88, Height = 28, FlatStyle = FlatStyle.Flat, BackColor = color, ForeColor = Color.White,
+        Cursor = Cursors.Hand, FlatAppearance = { BorderSize = 0 },
+        Font = new Font("Microsoft YaHei UI", 8.5F)
+    };
+
     private static ListView QueueList() => new()
     {
         Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = false,
         BorderStyle = BorderStyle.None, BackColor = Color.White, ForeColor = Ink, HeaderStyle = ColumnHeaderStyle.Nonclickable
     };
 
-    private static Panel Card(string title, string subtitle, Label count, ListView list, Color accent)
+    private static Panel Card(string title, string subtitle, Label count, Button clearBtn, ListView list, Color accent)
     {
         var p = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(16), Margin = new Padding(7) };
         var top = new Panel { Dock = DockStyle.Top, Height = 58 };
         var heading = new Label { Text = title, Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold), ForeColor = Ink, AutoSize = true, Left = 0, Top = 1 };
         var hint = new Label { Text = subtitle, ForeColor = Muted, AutoSize = true, Left = 1, Top = 31 };
-        count.Text = "0"; count.Font = new Font("Segoe UI", 16F, FontStyle.Bold); count.ForeColor = accent; count.AutoSize = true; count.Anchor = AnchorStyles.Top | AnchorStyles.Right; count.Left = 500; count.Top = 7;
-        top.Resize += (_, _) => count.Left = top.ClientSize.Width - count.Width - 4;
-        top.Controls.AddRange(new Control[] { heading, hint, count }); p.Controls.Add(list); p.Controls.Add(top); return p;
+        count.Text = "0";
+        count.Font = new Font("Segoe UI", 16F, FontStyle.Bold);
+        count.ForeColor = accent;
+        count.AutoSize = true;
+        count.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        clearBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        void LayoutRight()
+        {
+            // 右侧：计数 + 清空按钮，随卡片宽度贴右
+            clearBtn.Top = 12;
+            clearBtn.Left = Math.Max(heading.Right + 12, top.ClientSize.Width - clearBtn.Width - 4);
+            count.Top = 7;
+            count.Left = Math.Max(heading.Right + 8, clearBtn.Left - count.Width - 10);
+        }
+        top.Resize += (_, _) => LayoutRight();
+        top.Controls.AddRange(new Control[] { heading, hint, count, clearBtn });
+        top.HandleCreated += (_, _) => LayoutRight();
+        p.Controls.Add(list);
+        p.Controls.Add(top);
+        return p;
+    }
+
+    private void ClearNgQueue()
+    {
+        var n = _ngQueue.Count;
+        if (n == 0)
+        {
+            MessageBox.Show(this, "待 NG 队列已经是空的。", "清空队列", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var r = MessageBox.Show(this,
+            $"确定清空「待 NG」队列中的 {n} 条吗？\n\n仅清除软件内存中的排队记录，不会删除 A 目录里的图片文件。",
+            "清空待 NG 队列",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (r != DialogResult.Yes) return;
+        _ngQueue.ClearAll("用户点击清空待NG");
+        RefreshUi();
+    }
+
+    private void ClearJudgingQueue()
+    {
+        var n = _judgingQueue.Count;
+        if (n == 0)
+        {
+            MessageBox.Show(this, "待判断队列已经是空的。", "清空队列", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var r = MessageBox.Show(this,
+            $"确定清空「待判断」队列中的 {n} 条吗？\n\n仅清除软件内存中的排队记录，不会删除 B 目录图片，也不会发送 9/7 按键。",
+            "清空待判断队列",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (r != DialogResult.Yes) return;
+        _judgingQueue.ClearAll("用户点击清空待判断");
+        RefreshUi();
     }
 
     private void StartAll()
@@ -171,6 +240,8 @@ public sealed class MainForm : Form
         Fill(_ngList, ng.Select(x => new[] { x.ImageName, x.ProductDmc, x.EnqueuedAt.ToString("HH:mm:ss"), x.StagedPath }));
         Fill(_judgingList, judging.Select(x => new[] { x.Dmc, x.FolderKey, x.EnqueuedAt.ToString("HH:mm:ss"), x.SourcePath ?? "" }));
         _ngCount.Text = ng.Count.ToString(); _judgingCount.Text = judging.Count.ToString();
+        _clearNg.Enabled = ng.Count > 0;
+        _clearJudging.Enabled = judging.Count > 0;
         var running = _imageWatcher.IsRunning || _xmlGate.IsRunning || _cloud.IsRunning;
         _status.Text = running
             ? $"● 运行中    图片监听 ✓    XML报文 ✓    Log放行 ✓    待NG {ng.Count}    待判断 {judging.Count}"

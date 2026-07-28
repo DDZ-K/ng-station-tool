@@ -83,6 +83,27 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: tray close policy");
 
+            // 队列清空 API（对应主界面两个「清空队列」按钮）
+            ngQueue.Enqueue("CLEAR_IMG1", "CLEAR_PROD", Path.Combine(output, "CLEAR_IMG1.jpg"));
+            ngQueue.Enqueue("CLEAR_IMG2", "CLEAR_PROD", Path.Combine(output, "CLEAR_IMG2.jpg"));
+            cache.TryEnqueue("CLEAR_JUDGE1", "selftest", null, folderKey: "CLEAR_PROD");
+            if (ngQueue.Count < 2 || cache.Count < 1)
+            {
+                Console.WriteLine("FAIL: seed queues before clear");
+                fail++;
+            }
+            else
+            {
+                ngQueue.ClearAll("selftest-clear-ng");
+                cache.ClearAll("selftest-clear-judging");
+                if (ngQueue.Count != 0 || cache.Count != 0)
+                {
+                    Console.WriteLine($"FAIL: clear queues ng={ngQueue.Count} judging={cache.Count}");
+                    fail++;
+                }
+                else Console.WriteLine("PASS: clear NG + judging queues");
+            }
+
             img.Start();
             cloud.Start();
             xmlGate.Start();
