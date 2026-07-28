@@ -83,6 +83,22 @@ internal static class SelfTest
             }
             else Console.WriteLine("PASS: tray close policy");
 
+            // 料号白名单：产品 DMC 包含任一维护料号才服务；空列表/仅空白=不过滤（兼容旧配置）
+            var parts = new[] { "6915300000", "1234567890" };
+            if (!PartNumberRules.IsServedProduct("69153000000110002204088638907524", parts)
+                || !PartNumberRules.IsServedProduct("XX1234567890YY", parts)
+                || PartNumberRules.IsServedProduct("99999999999999", parts)
+                || !PartNumberRules.IsServedProduct("ANYTHING", Array.Empty<string>())
+                || !PartNumberRules.IsServedProduct("ANYTHING", null)
+                || !PartNumberRules.IsServedProduct("6915300000011", new[] { "  ", "" }) // 空白项被忽略 → 等同空列表
+                || !PartNumberRules.TryFindMatchedPart("ABC6915300000XYZ", parts, out var hit)
+                || hit != "6915300000")
+            {
+                Console.WriteLine("FAIL: part-number match rules");
+                fail++;
+            }
+            else Console.WriteLine("PASS: part-number match rules");
+
             // 队列清空 API（对应主界面两个「清空队列」按钮）
             ngQueue.Enqueue("CLEAR_IMG1", "CLEAR_PROD", Path.Combine(output, "CLEAR_IMG1.jpg"));
             ngQueue.Enqueue("CLEAR_IMG2", "CLEAR_PROD", Path.Combine(output, "CLEAR_IMG2.jpg"));
@@ -108,6 +124,69 @@ internal static class SelfTest
             cloud.Start();
             xmlGate.Start();
             Thread.Sleep(800);
+
+            // 料号过滤：未命中产品不进 A / 待NG；命中则正常入队
+            {
+                var jpeg = new byte[256];
+                var jpegHead = new byte[]
+                {
+                    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+                    0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00
+                };
+                Array.Copy(jpegHead, jpeg, jpegHead.Length);
+                jpeg[^2] = 0xFF; jpeg[^1] = 0xD9;
+                live.PartNumbers = new List<string> { "SERVEME10XX" };
+                // 确保规则本身对文件夹名成立（避免只是时序误报）
+                if (!PartNumberRules.IsServedProduct("PRE_SERVEME10XX_TAIL", live.PartNumbers)
+                    || PartNumberRules.IsServedProduct("OTHERPRODUCT999", live.PartNumbers))
+                {
+                    Console.WriteLine("FAIL: part-number rules vs integration folders");
+                    fail++;
+                }
+
+                var rejectFolder = "OTHERPRODUCT999";
+                var rejectSub = Path.Combine(watch, rejectFolder);
+                Directory.CreateDirectory(rejectSub);
+                Thread.Sleep(150);
+                File.WriteAllBytes(Path.Combine(rejectSub, "x.jpg"), jpeg);
+                Thread.Sleep(Math.Max(1500, cfg.FolderSettleMs + 900));
+                var rejectOut = Directory.Exists(output)
+                    ? Directory.EnumerateFiles(output, "*", SearchOption.AllDirectories)
+                        .Any(f => Path.GetFileName(f).StartsWith(rejectFolder, StringComparison.OrdinalIgnoreCase))
+                    : false;
+                if (ngQueue.Snapshot().Any(x => x.ProductDmc.Equals(rejectFolder, StringComparison.OrdinalIgnoreCase)) || rejectOut)
+                {
+                    Console.WriteLine("FAIL: non-matching part-number product should be ignored");
+                    fail++;
+                }
+                else Console.WriteLine("PASS: non-matching part-number product ignored");
+
+                var acceptFolder = "PRE_SERVEME10XX_TAIL";
+                var acceptSub = Path.Combine(watch, acceptFolder);
+                Directory.CreateDirectory(acceptSub);
+                Thread.Sleep(200);
+                var acceptJpg = Path.Combine(acceptSub, "y.jpg");
+                File.WriteAllBytes(acceptJpg, jpeg);
+                // 再触一次写，保证 FSW 与静默计时都能看到
+                Thread.Sleep(100);
+                File.SetLastWriteTimeUtc(acceptJpg, DateTime.UtcNow);
+                File.WriteAllBytes(acceptJpg, jpeg);
+
+                var acceptDeadline = DateTime.Now.AddSeconds(15);
+                while (DateTime.Now < acceptDeadline
+                       && !ngQueue.Snapshot().Any(x => x.ProductDmc.Equals(acceptFolder, StringComparison.OrdinalIgnoreCase)))
+                    Thread.Sleep(100);
+                if (!ngQueue.Snapshot().Any(x => x.ProductDmc.Equals(acceptFolder, StringComparison.OrdinalIgnoreCase)))
+                {
+                    Console.WriteLine("FAIL: matching part-number product should enter pending-NG; queue=" +
+                        string.Join(",", ngQueue.Snapshot().Select(x => x.ProductDmc + ":" + x.ImageName)));
+                    fail++;
+                }
+                else Console.WriteLine("PASS: matching part-number product entered pending-NG");
+
+                ngQueue.ClearAll("selftest-part-filter-cleanup");
+                live.PartNumbers = new List<string>(); // 后续用例保持不过滤
+            }
 
             // 1) 同夹写入 2 张图 → 静默后整夹一次拷贝，入 2 条 DMC
             var dmc = "DMCTEST001";

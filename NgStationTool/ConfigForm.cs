@@ -6,8 +6,10 @@ public sealed class ConfigForm : Form
     private readonly TextBox _watch, _a, _b, _xml, _xmlArchive, _logs, _logsArchive;
     private readonly TextBox _okKey, _nokKey, _enterKey, _title, _process, _imageExts, _logExts, _okTokens, _nokTokens, _dateFormat;
     private readonly CheckBox _auto, _enterAfterAll, _appendDate, _skipSame, _onlyDirect;
-    private readonly NumericUpDown _settle, _batchWait, _xmlReady, _logReady, _keyDelay, _activateDelay, _enterDelay, _enterRepeat, _keyRepeat;
-    private readonly FlowLayoutPanel _sections;
+        private readonly NumericUpDown _settle, _batchWait, _xmlReady, _logReady, _keyDelay, _activateDelay, _enterDelay, _enterRepeat, _keyRepeat;
+        private readonly FlowLayoutPanel _sections;
+        private readonly ListBox _partList;
+        private readonly TextBox _partInput;
 
     private static readonly Color Bg = Color.FromArgb(244, 247, 250);
     private static readonly Color Ink = Color.FromArgb(30, 41, 59);
@@ -34,9 +36,12 @@ public sealed class ConfigForm : Form
         _xml = Field(core.Body, "XML 报文监控目录", cfg.XmlWatchRoot, "读取 partReceived 节点的 identifier");
         _xmlArchive = Field(core.Body, "XML 报文归档目录", cfg.XmlArchiveRoot, "自动分为 已匹配 / 未匹配");
         _logs = Field(core.Body, "云端 Log 目录", cfg.CloudLogRoot, "文件名需包含完整图片名");
-        _logsArchive = Field(core.Body, "Log 归档目录", cfg.CloudLogArchiveRoot, "OK/NOK 后移入");
+                _logsArchive = Field(core.Body, "Log 归档目录", cfg.CloudLogArchiveRoot, "OK/NOK 后移入");
 
-        var keys = Section("⌨  判定与按键", "OK/NOK、回车和目标软件", false);
+                var parts = Section("🏷  服务料号", "只处理产品 DMC 中包含这些料号的型号；空列表=不过滤", true);
+                (_partList, _partInput) = PartNumberEditor(parts.Body, cfg.PartNumbers);
+
+                var keys = Section("⌨  判定与按键", "OK/NOK、回车和目标软件", false);
         _okKey = Field(keys.Body, "OK 键", cfg.OkKey);
         _nokKey = Field(keys.Body, "NOK 键", cfg.NokKey);
         _keyRepeat = Number(keys.Body, "9/7 连按次数", cfg.KeyRepeatCount, 1, 5);
@@ -66,7 +71,7 @@ public sealed class ConfigForm : Form
         _activateDelay = Number(advanced.Body, "激活窗口后延迟（ms）", cfg.ActivateWindowDelayMs, 0, 5000);
         _auto = Check(advanced.Body, "程序打开后自动开始监控", cfg.AutoStartOnLaunch);
 
-        _sections.Controls.AddRange(new Control[] { core.Container, keys.Container, images.Container, advanced.Container });
+        _sections.Controls.AddRange(new Control[] { core.Container, parts.Container, keys.Container, images.Container, advanced.Container });
 
         var footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
         var footerActions = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 250, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = new Padding(8, 14, 12, 8) };
@@ -105,6 +110,55 @@ public sealed class ConfigForm : Form
         container.Height = expanded ? body.PreferredSize.Height + 56 : 56;
         body.SizeChanged += (_, _) => { if (body.Visible) container.Height = body.PreferredSize.Height + 56; };
         return (container, body);
+    }
+
+    private static (ListBox list, TextBox input) PartNumberEditor(FlowLayoutPanel body, IEnumerable<string> initial)
+    {
+        var wrap = new Panel { Width = 760, Height = 210, Margin = new Padding(0, 4, 0, 4), Tag = "parts" };
+        wrap.Controls.Add(new Label
+        {
+            Text = "产品 DMC 包含任一料号即服务（一般 10 位；可维护多条）",
+            Left = 0, Top = 0, Width = 720, Height = 22, ForeColor = Muted
+        });
+        var list = new ListBox
+        {
+            Left = 0, Top = 28, Width = 520, Height = 140,
+            IntegralHeight = false, BorderStyle = BorderStyle.FixedSingle,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+        };
+        foreach (var pn in PartNumberRules.Normalize(initial)) list.Items.Add(pn);
+        var input = new TextBox { Left = 0, Top = 176, Width = 360, BorderStyle = BorderStyle.FixedSingle };
+        var add = ActionButton("添加", Blue, 70); add.Left = 370; add.Top = 172; add.Height = 30;
+        var del = ActionButton("删除选中", Color.FromArgb(100, 116, 139), 90); del.Left = 448; del.Top = 172; del.Height = 30;
+        var clear = ActionButton("清空", Color.FromArgb(148, 163, 184), 70); clear.Left = 546; clear.Top = 172; clear.Height = 30;
+        void AddCurrent()
+        {
+            foreach (var pn in PartNumberRules.Normalize(new[] { input.Text }))
+            {
+                var exists = false;
+                foreach (var item in list.Items)
+                {
+                    if (string.Equals(item?.ToString(), pn, StringComparison.OrdinalIgnoreCase)) { exists = true; break; }
+                }
+                if (!exists) list.Items.Add(pn);
+            }
+            input.Clear();
+            input.Focus();
+        }
+        add.Click += (_, _) => AddCurrent();
+        input.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; AddCurrent(); }
+        };
+        del.Click += (_, _) =>
+                {
+                    var selected = list.SelectedItems.Cast<object>().Where(x => x != null).ToList();
+                    foreach (var item in selected) list.Items.Remove(item!);
+                };
+        clear.Click += (_, _) => list.Items.Clear();
+        wrap.Controls.AddRange(new Control[] { list, input, add, del, clear });
+        body.Controls.Add(wrap);
+        return (list, input);
     }
 
     private static TextBox Field(FlowLayoutPanel body, string label, string value, string? hint = null)
@@ -159,9 +213,17 @@ public sealed class ConfigForm : Form
                     }
                 }
                 else if (row.Tag as string == "check")
-                {
-                    row.Width = contentWidth;
-                }
+                                {
+                                    row.Width = contentWidth;
+                                }
+                                else if (row.Tag as string == "parts")
+                                {
+                                    row.Width = contentWidth;
+                                    if (row.Controls.OfType<ListBox>().FirstOrDefault() is { } lb)
+                                    {
+                                        lb.Width = Math.Max(360, contentWidth - 20);
+                                    }
+                                }
             }
             if (body.Visible) control.Height = body.PreferredSize.Height + 56;
         }
@@ -177,13 +239,19 @@ public sealed class ConfigForm : Form
         c.AppendDateToFileName = _appendDate.Checked; c.FileNameDateFormat = _dateFormat.Text.Trim(); c.SkipIfSameSizeExists = _skipSame.Checked; c.OnlyDirectImages = _onlyDirect.Checked;
         c.FolderSettleMs = (int)_settle.Value; c.BatchMaxWaitMs = (int)_batchWait.Value; c.XmlReadyBudgetMs = (int)_xmlReady.Value; c.LogReadyBudgetMs = (int)_logReady.Value;
         c.KeyPressDelayMs = (int)_keyDelay.Value; c.ActivateWindowDelayMs = (int)_activateDelay.Value; c.AutoStartOnLaunch = _auto.Checked;
-        // 图片/云端模块默认保持开启；A 队列入队由 ImageCopyWatcher 强制执行，不再依赖旧开关。
-                // 仍把 EnqueueFromImageCopyFolderName 写成 true，避免旧字段在别处被误读成关闭。
-                c.EnableImageCopy = true;
-                c.EnableCloudRelease = true;
-                c.EnqueueFromImageCopyFolderName = true;
-                c.EnqueueFromNgImageWatch = false;
-                return c;
+                c.PartNumbers = _partList.Items.Cast<object>()
+                    .Select(x => x?.ToString() ?? "")
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Select(x => x.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                // 图片/云端模块默认保持开启；A 队列入队由 ImageCopyWatcher 强制执行，不再依赖旧开关。
+                        // 仍把 EnqueueFromImageCopyFolderName 写成 true，避免旧字段在别处被误读成关闭。
+                        c.EnableImageCopy = true;
+                        c.EnableCloudRelease = true;
+                        c.EnqueueFromImageCopyFolderName = true;
+                        c.EnqueueFromNgImageWatch = false;
+                        return c;
     }
 
     private static List<string> Split(string value) => value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();

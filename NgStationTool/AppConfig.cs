@@ -94,9 +94,15 @@ public sealed class AppConfig
     /// <summary>启动后是否自动开始监视。</summary>
     public bool AutoStartOnLaunch { get; set; } = false;
     public int MaxLogLines { get; set; } = 500;
-    public int UiRefreshMs { get; set; } = 500;
+        public int UiRefreshMs { get; set; } = 500;
 
-    public static string DefaultPath
+        /// <summary>
+        /// 产线服务料号白名单。产品 DMC（一级文件夹名）包含任一料号才进入 A/待NG 及后续流程。
+        /// 料号一般约 10 位；空列表 = 不过滤。
+        /// </summary>
+        public List<string> PartNumbers { get; set; } = new();
+
+        public static string DefaultPath
     {
         get
         {
@@ -115,12 +121,14 @@ public sealed class AppConfig
                 var json = File.ReadAllText(path);
                 var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts());
                                 if (cfg != null)
-                                {
-                                    // 兼容旧配置：曾因配置窗误把此字段写成 false，导致只拷贝不入待NG。
-                                    // A→XML 门控路径下该字段已无意义，加载时强制 true。
-                                    cfg.EnqueueFromImageCopyFolderName = true;
-                                    return cfg;
-                                }
+                                                {
+                                                    // 兼容旧配置：曾因配置窗误把此字段写成 false，导致只拷贝不入待NG。
+                                                    // A→XML 门控路径下该字段已无意义，加载时强制 true。
+                                                    cfg.EnqueueFromImageCopyFolderName = true;
+                                                    cfg.PartNumbers ??= new List<string>();
+                                                    cfg.PartNumbers = PartNumberRules.Normalize(cfg.PartNumbers).ToList();
+                                                    return cfg;
+                                                }
             }
         }
         catch

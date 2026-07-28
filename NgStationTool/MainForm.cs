@@ -47,7 +47,7 @@ public sealed class MainForm : Form
         _imageWatcher = new ImageCopyWatcher(_log, () => _cfg,
             (imageName, path, productDmc) => _ngQueue.Enqueue(imageName, productDmc, path));
 
-        Text = "NG 工位流转中心  v1.5.2";
+        Text = "NG 工位流转中心  v1.6.0";
         Width = 1180;
         Height = 760;
         MinimumSize = new Size(960, 620);
@@ -114,7 +114,7 @@ public sealed class MainForm : Form
             ContextMenuStrip = BuildTrayMenu()
         };
         _tray.DoubleClick += (_, _) => RestoreFromTray();
-        Load += (_, _) => { _log.Info("系统", "程序启动 | 版本=v1.5.2"); if (_cfg.AutoStartOnLaunch) StartAll(); else RefreshUi(); };
+        Load += (_, _) => { _log.Info("系统", "程序启动 | 版本=v1.6.0"); if (_cfg.AutoStartOnLaunch) StartAll(); else RefreshUi(); };
         FormClosing += OnFormClosing;
         Resize += (_, _) => { ResizeQueueColumns(_ngList); ResizeQueueColumns(_judgingList); };
         Shown += (_, _) => { ResizeQueueColumns(_ngList); ResizeQueueColumns(_judgingList); };
@@ -243,10 +243,12 @@ public sealed class MainForm : Form
         _clearNg.Enabled = ng.Count > 0;
         _clearJudging.Enabled = judging.Count > 0;
         var running = _imageWatcher.IsRunning || _xmlGate.IsRunning || _cloud.IsRunning;
-        _status.Text = running
-            ? $"● 运行中    图片监听 ✓    XML报文 ✓    Log放行 ✓    待NG {ng.Count}    待判断 {judging.Count}"
-            : $"● 已停止    待NG {ng.Count}    待判断 {judging.Count}";
-        _status.ForeColor = running ? Green : Muted;
+                var partCount = PartNumberRules.Normalize(_cfg.PartNumbers).Count();
+                var partHint = partCount == 0 ? "料号过滤关(空列表)" : $"服务料号 {partCount}";
+                _status.Text = running
+                    ? $"● 运行中    图片 ✓    XML ✓    Log ✓    待NG {ng.Count}    待判断 {judging.Count}    {partHint}"
+                    : $"● 已停止    待NG {ng.Count}    待判断 {judging.Count}    {partHint}";
+                _status.ForeColor = running ? Green : Muted;
     }
 
     private static void Fill(ListView list, IEnumerable<string[]> rows)

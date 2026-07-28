@@ -16,9 +16,10 @@ public sealed class ImageCopyWatcher : IDisposable
     /// 源路径 → 已成功处理时的 LastWriteTimeUtc.Ticks。
     /// </summary>
     private readonly ConcurrentDictionary<string, long> _handledWriteTicks = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, long> _folderTouch = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, byte> _folderBusy = new(StringComparer.OrdinalIgnoreCase);
-    private readonly AutoResetEvent _signal = new(false);
+        private readonly ConcurrentDictionary<string, long> _folderTouch = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, byte> _folderBusy = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, byte> _partSkippedFolders = new(StringComparer.OrdinalIgnoreCase);
+        private readonly AutoResetEvent _signal = new(false);
     private CancellationTokenSource? _cts;
     private Task? _worker;
     private int _running;
@@ -62,9 +63,10 @@ public sealed class ImageCopyWatcher : IDisposable
 
             _cts = new CancellationTokenSource();
             _handledWriteTicks.Clear();
-            _folderTouch.Clear();
-            _folderBusy.Clear();
-            _startedAtUtc = DateTime.UtcNow;
+                        _folderTouch.Clear();
+                        _folderBusy.Clear();
+                        _partSkippedFolders.Clear();
+                        _startedAtUtc = DateTime.UtcNow;
             _worker = Task.Factory.StartNew(() => WorkerLoop(_cts.Token), TaskCreationOptions.LongRunning);
 
             _watcher = new FileSystemWatcher(cfg.WatchRoot)
@@ -224,7 +226,23 @@ public sealed class ImageCopyWatcher : IDisposable
         if (!Directory.Exists(folder)) return;
 
         var folderName = Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (string.IsNullOrEmpty(folderName)) return;
+                if (string.IsNullOrEmpty(folderName)) return;
+
+                // 料号白名单：产品 DMC（文件夹名）不包含任一维护料号 → 整夹忽略（不拷贝、不入队）
+                                if (!PartNumberRules.IsServedProduct(folderName, cfg.PartNumbers))
+                                {
+                                    if (_partSkippedFolders.TryAdd(folderName, 0))
+                                    {
+                                        var matchedHint = PartNumberRules.Normalize(cfg.PartNumbers).Count();
+                                        _log.Skip("料号",
+                                            $"产品不在服务料号列表，忽略整夹 | 产品DMC={folderName} | 已维护料号数={matchedHint}");
+                                    }
+                                    return;
+                                }
+
+                // 料号白名单命中时写一条便于核对（仅首次）
+        if (PartNumberRules.TryFindMatchedPart(folderName, cfg.PartNumbers, out var matchedPart))
+            _log.Info("料号", $"产品命中服务料号 | 产品DMC={folderName} | 料号={matchedPart}");
 
         // 1) 列本会话新图：未处理过的写入版本才进候选
         var candidates = new List<string>();
