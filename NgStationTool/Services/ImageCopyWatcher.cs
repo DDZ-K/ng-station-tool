@@ -355,8 +355,17 @@ public sealed class ImageCopyWatcher : IDisposable
 
                 okCount++;
                 dmcList.Add(stem);
-                if (cfg.EnableCloudRelease && cfg.EnqueueFromImageCopyFolderName)
+                // v1.5+：拷贝到 A 后必须进「待 NG」队列（产品 DMC=一级文件夹名）。
+                // 不得再被 EnqueueFromImageCopyFolderName 关掉——该开关是旧版「直接入云端缓存」遗留字段。
+                // 否则会出现：拷贝成功但待NG为空 → XML 明明有 identifier 却报「不在待NG队列」。
+                try
+                {
                     _onCopiedRenamedDmc?.Invoke(stem, outPath, folderName);
+                }
+                catch (Exception exEnqueue)
+                {
+                    _log.Error("待NG", $"拷贝后入队失败 图片={stem} 产品DMC={folderName}: {exEnqueue.Message}");
+                }
             }
             catch (Exception ex)
             {

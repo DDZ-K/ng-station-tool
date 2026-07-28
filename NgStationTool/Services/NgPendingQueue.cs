@@ -47,8 +47,40 @@ public sealed class NgPendingQueue
     public List<NgPendingItem> Snapshot() => _items.Values.OrderBy(x => x.EnqueuedAt).ToList();
 
     public List<NgPendingItem> SnapshotByProduct(string productDmc)
-        => _items.Values.Where(x => string.Equals(x.ProductDmc, productDmc?.Trim(), StringComparison.OrdinalIgnoreCase))
-            .OrderBy(x => x.EnqueuedAt).ToList();
+    {
+        var key = (productDmc ?? "").Trim();
+        if (key.Length == 0) return new List<NgPendingItem>();
+
+        // 1) 精确匹配：文件夹名 == XML identifier
+        var exact = _items.Values
+            .Where(x => string.Equals(x.ProductDmc, key, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(x => x.EnqueuedAt)
+            .ToList();
+        if (exact.Count > 0) return exact;
+
+        // 2) 宽松匹配：产线文件夹常带站位后缀，如 identifier=DMC123，文件夹=DMC123_S1
+        //    仅允许「文件夹以 identifier + 分隔符开头」，避免短串误伤。
+        return _items.Values
+            .Where(x => ProductDmcMatchesIdentifier(x.ProductDmc, key))
+            .OrderBy(x => x.EnqueuedAt)
+            .ToList();
+    }
+
+    /// <summary>
+    /// identifier 与产品文件夹名是否视为同一件。
+    /// 精确相等，或文件夹 = identifier + '_'/' -' 后缀（站位/夹号）。
+    /// </summary>
+    public static bool ProductDmcMatchesIdentifier(string productDmc, string identifier)
+    {
+        productDmc = (productDmc ?? "").Trim();
+        identifier = (identifier ?? "").Trim();
+        if (productDmc.Length == 0 || identifier.Length == 0) return false;
+        if (string.Equals(productDmc, identifier, StringComparison.OrdinalIgnoreCase)) return true;
+        if (productDmc.Length <= identifier.Length) return false;
+        if (!productDmc.StartsWith(identifier, StringComparison.OrdinalIgnoreCase)) return false;
+        var next = productDmc[identifier.Length];
+        return next is '_' or '-' or ' ' or '.';
+    }
 
     public bool Remove(string imageName)
     {

@@ -67,7 +67,10 @@ public sealed class AppConfig
     public string DmcFromLog { get; set; } = "FileStem";
     /// <summary>是否监视 NG 图目录进缓存。默认 false：推荐只用「复制成功后子文件夹名=DMC」入队，避免 OutputRoot 与 NgImage 相同导致改名图二次入缓存。</summary>
     public bool EnqueueFromNgImageWatch { get; set; } = false;
-    /// <summary>图片复制成功后是否把「改名后完整文件名（无扩展名）」作为 DMC 入缓存。</summary>
+    /// <summary>
+    /// 兼容旧 config 字段。v1.5.1+ 待 NG 入队不再依赖此开关（拷贝成功即入 A 队列）；
+    /// 配置界面保存/加载时会强制写回 true。
+    /// </summary>
     public bool EnqueueFromImageCopyFolderName { get; set; } = true;
     /// <summary>整夹全部 OK/NOK 后是否再按一次回车。</summary>
     public bool EnterAfterFolderAllDone { get; set; } = true;
@@ -111,8 +114,13 @@ public sealed class AppConfig
             {
                 var json = File.ReadAllText(path);
                 var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts());
-                if (cfg != null)
-                    return cfg;
+                                if (cfg != null)
+                                {
+                                    // 兼容旧配置：曾因配置窗误把此字段写成 false，导致只拷贝不入待NG。
+                                    // A→XML 门控路径下该字段已无意义，加载时强制 true。
+                                    cfg.EnqueueFromImageCopyFolderName = true;
+                                    return cfg;
+                                }
             }
         }
         catch

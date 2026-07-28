@@ -45,7 +45,7 @@ internal static class SelfTest
             SizeStableChecks = 2,
             RetryDelayMs = 40,
             DebounceMs = 50,
-            EnqueueFromImageCopyFolderName = true,
+            EnqueueFromImageCopyFolderName = false, // v1.5.1：即使 false，拷贝后也必须入待NG（回归本 bug）
             EnqueueFromNgImageWatch = false, // 本测只测文件夹名入队，避免输出目录二次入队干扰
             LogReadyBudgetMs = 500,
             ResultLineNumber = 1, // 废弃字段，忽略
@@ -60,7 +60,7 @@ internal static class SelfTest
         var log = new AppLogger(Path.Combine(root, "test_log.txt"), 200);
         var cache = new DmcPendingCache(log);
         var ngQueue = new NgPendingQueue(log);
-        var kb = new KeyboardService(log);
+        var kb = new KeyboardService(log) { DryRun = true };
         AppConfig live = cfg;
         var cloud = new CloudReleaseService(log, () => live, cache, kb);
         var xmlGate = new XmlDmcGateService(log, () => live, ngQueue, (name, path, productDmc) =>
@@ -167,6 +167,39 @@ internal static class SelfTest
                 fail++;
             }
             else Console.WriteLine("PASS: matched and unmatched XML reports archived");
+
+            // 1a) 产品文件夹带站位后缀 _S1，XML identifier 为无后缀主体 → 应命中
+            {
+                var baseId = "DMCSUFFIX001";
+                var folderSuf = baseId + "_S1";
+                var subSuf = Path.Combine(watch, folderSuf);
+                Directory.CreateDirectory(subSuf);
+                Thread.Sleep(150);
+                var jpgSuf = Path.Combine(subSuf, "view.jpg");
+                File.WriteAllBytes(jpgSuf, buf);
+                var expectedSuf = folderSuf + "_view" + (cfg.AppendDateToFileName ? "_" + DateTime.Now.ToString(cfg.FileNameDateFormat) : "");
+                deadline = DateTime.Now.AddSeconds(12);
+                while (DateTime.Now < deadline && !ngQueue.Snapshot().Any(x => x.ImageName == expectedSuf)) Thread.Sleep(100);
+                if (!ngQueue.Snapshot().Any(x => x.ImageName == expectedSuf && x.ProductDmc == folderSuf))
+                {
+                    Console.WriteLine("FAIL: suffix folder not enqueued to pending-NG");
+                    fail++;
+                }
+                else Console.WriteLine("PASS: suffix product folder enqueued to pending-NG");
+
+                var xmlSuf = Path.Combine(reports, "suffix.xml");
+                File.WriteAllText(xmlSuf,
+                    $"<?xml version=\"1.0\"?><root><event><partReceived identifier=\"{baseId}\" /></event></root>");
+                deadline = DateTime.Now.AddSeconds(8);
+                while (DateTime.Now < deadline && ngQueue.Snapshot().Any(x => x.ImageName == expectedSuf)) Thread.Sleep(100);
+                if (ngQueue.Snapshot().Any(x => x.ImageName == expectedSuf) || !cache.Contains(expectedSuf))
+                {
+                    Console.WriteLine($"FAIL: identifier without _S1 should promote suffix folder; ngHas={ngQueue.Snapshot().Any(x => x.ImageName == expectedSuf)} judgingHas={cache.Contains(expectedSuf)}");
+                    fail++;
+                }
+                else Console.WriteLine("PASS: identifier matched product folder with _S1 suffix");
+                cache.ForceRemove(expectedSuf, "selftest suffix cleanup");
+            }
 
             // 1b) 单张文件夹：只 1 张图也必须拷贝+入队（回归：单张不行）
             cache.ForceRemove(expected1, "selftest single prep");

@@ -44,7 +44,7 @@ public sealed class MainForm : Form
         _imageWatcher = new ImageCopyWatcher(_log, () => _cfg,
             (imageName, path, productDmc) => _ngQueue.Enqueue(imageName, productDmc, path));
 
-        Text = "NG 工位流转中心  v1.5.0";
+        Text = "NG 工位流转中心  v1.5.1";
         Width = 1180;
         Height = 760;
         MinimumSize = new Size(960, 620);
@@ -107,7 +107,7 @@ public sealed class MainForm : Form
             ContextMenuStrip = BuildTrayMenu()
         };
         _tray.DoubleClick += (_, _) => RestoreFromTray();
-        Load += (_, _) => { _log.Info("系统", "程序启动 | 版本=v1.5.0"); if (_cfg.AutoStartOnLaunch) StartAll(); else RefreshUi(); };
+        Load += (_, _) => { _log.Info("系统", "程序启动 | 版本=v1.5.1"); if (_cfg.AutoStartOnLaunch) StartAll(); else RefreshUi(); };
         FormClosing += OnFormClosing;
         Resize += (_, _) => { ResizeQueueColumns(_ngList); ResizeQueueColumns(_judgingList); };
         Shown += (_, _) => { ResizeQueueColumns(_ngList); ResizeQueueColumns(_judgingList); };

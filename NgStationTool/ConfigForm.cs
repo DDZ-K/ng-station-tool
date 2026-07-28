@@ -177,8 +177,13 @@ public sealed class ConfigForm : Form
         c.AppendDateToFileName = _appendDate.Checked; c.FileNameDateFormat = _dateFormat.Text.Trim(); c.SkipIfSameSizeExists = _skipSame.Checked; c.OnlyDirectImages = _onlyDirect.Checked;
         c.FolderSettleMs = (int)_settle.Value; c.BatchMaxWaitMs = (int)_batchWait.Value; c.XmlReadyBudgetMs = (int)_xmlReady.Value; c.LogReadyBudgetMs = (int)_logReady.Value;
         c.KeyPressDelayMs = (int)_keyDelay.Value; c.ActivateWindowDelayMs = (int)_activateDelay.Value; c.AutoStartOnLaunch = _auto.Checked;
-        c.EnableImageCopy = true; c.EnableCloudRelease = true; c.EnqueueFromImageCopyFolderName = false; c.EnqueueFromNgImageWatch = false;
-        return c;
+        // 图片/云端模块默认保持开启；A 队列入队由 ImageCopyWatcher 强制执行，不再依赖旧开关。
+                // 仍把 EnqueueFromImageCopyFolderName 写成 true，避免旧字段在别处被误读成关闭。
+                c.EnableImageCopy = true;
+                c.EnableCloudRelease = true;
+                c.EnqueueFromImageCopyFolderName = true;
+                c.EnqueueFromNgImageWatch = false;
+                return c;
     }
 
     private static List<string> Split(string value) => value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();

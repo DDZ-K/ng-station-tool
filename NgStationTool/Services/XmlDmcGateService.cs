@@ -103,7 +103,27 @@ public sealed class XmlDmcGateService : IDisposable
             return;
         }
 
-        var pending = identifier.Length == 0 ? new List<NgPendingItem>() : _ngQueue.SnapshotByProduct(identifier);
+        if (identifier.Length == 0)
+        {
+            _log.Warn("报文", $"XML 无 identifier，归档未匹配: {Path.GetFileName(path)}");
+            ArchiveReport(path, matched: false, "无有效identifier");
+            _handledWrites[path] = write;
+            return;
+        }
+
+        var pending = _ngQueue.SnapshotByProduct(identifier);
+        if (pending.Count == 0)
+        {
+            // 诊断：列出当前待NG 的产品DMC，方便对照 identifier 是否差后缀/大小写
+            var all = _ngQueue.Snapshot();
+            var products = all.Select(x => x.ProductDmc).Distinct(StringComparer.OrdinalIgnoreCase).Take(12).ToList();
+            _log.Warn("报文",
+                $"identifier={identifier} 不在待NG队列（当前待NG={all.Count} 产品=[{string.Join(", ", products)}]）");
+            ArchiveReport(path, matched: false, $"identifier={identifier} 不在待NG队列");
+            _handledWrites[path] = write;
+            return;
+        }
+
         var promoted = 0;
         foreach (var item in pending)
         {
@@ -122,7 +142,8 @@ public sealed class XmlDmcGateService : IDisposable
                 _ngQueue.Remove(item.ImageName);
                 _onPromoted(item.ImageName, destination, item.ProductDmc);
                 promoted++;
-                _log.Success("报文", $"identifier={identifier} 命中：A→B {item.ImageName} → {destination}");
+                _log.Success("报文",
+                    $"identifier={identifier} 命中产品DMC={item.ProductDmc}：A→B {item.ImageName} → {destination}");
             }
             catch (Exception ex)
             {
@@ -131,7 +152,7 @@ public sealed class XmlDmcGateService : IDisposable
         }
 
         var matched = promoted > 0;
-        ArchiveReport(path, matched, matched ? $"命中{promoted}张" : $"identifier={identifier} 不在待NG队列");
+        ArchiveReport(path, matched, matched ? $"命中{promoted}张" : $"identifier={identifier} A→B失败0张");
         _handledWrites[path] = write;
     }
 

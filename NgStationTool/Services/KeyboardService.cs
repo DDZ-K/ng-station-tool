@@ -8,6 +8,8 @@ namespace NgStationTool.Services;
 public sealed class KeyboardService
 {
     private readonly AppLogger _log;
+    /// <summary>自检/无交互环境：不真发键，直接视为成功。</summary>
+    public bool DryRun { get; set; }
 
     public KeyboardService(AppLogger log) => _log = log;
 
@@ -17,6 +19,12 @@ public sealed class KeyboardService
         {
             _log.Error("键盘", $"未知按键配置: {keyName}");
             return false;
+        }
+
+        if (DryRun)
+        {
+            _log.Success("键盘", $"[DryRun] 模拟发送 {label} x{Math.Max(1, repeat)}");
+            return true;
         }
 
         try
