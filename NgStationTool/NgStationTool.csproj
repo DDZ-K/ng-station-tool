@@ -8,9 +8,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>NgStationTool</AssemblyName>
     <RootNamespace>NgStationTool</RootNamespace>
-    <Version>1.6.0</Version>
-        <Product>NG 工位流转中心</Product>
-        <Description>图片 A/B + XML DMC + 料号白名单 + 云端 Log 按键（Win10）</Description>
+    <Version>1.6.1</Version>
+            <Product>NG 工位流转中心</Product>
+            <Description>图片 A/B + XML DMC + 正反面000/001 + 料号白名单 + 云端 Log 按键（Win10）</Description>
     <LangVersion>latest</LangVersion>
         <ApplicationManifest>app.manifest</ApplicationManifest>
         <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

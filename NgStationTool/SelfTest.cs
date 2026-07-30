@@ -8,6 +8,13 @@ internal static class SelfTest
     public static int Run()
     {
         Console.WriteLine("NgStationTool self-test starting...");
+        var unitFail = RunMatchUnitTests();
+        if (unitFail != 0)
+        {
+            Console.WriteLine($"FAIL: dual-face/suffix match unit tests failed count={unitFail}");
+            return 1;
+        }
+
         var root = Path.Combine(Path.GetTempPath(), "ng-station-selftest-" + Guid.NewGuid().ToString("N")[..8]);
         var watch = Path.Combine(root, "watch");
         var output = Path.Combine(root, "out");
@@ -301,6 +308,40 @@ internal static class SelfTest
                 cache.ForceRemove(expectedSuf, "selftest suffix cleanup");
             }
 
+            // 1a2) 正反面扫码 000/001：图文件夹 001，XML identifier 000 → 应命中
+            {
+                var face001 = "69165000510660012607298629502112";
+                var face000 = "69165000510660002607298629502112";
+                var subFace = Path.Combine(watch, face001);
+                Directory.CreateDirectory(subFace);
+                Thread.Sleep(150);
+                var jpgFace = Path.Combine(subFace, "side.jpg");
+                File.WriteAllBytes(jpgFace, buf);
+                var expectedFace = face001 + "_side" + (cfg.AppendDateToFileName ? "_" + DateTime.Now.ToString(cfg.FileNameDateFormat) : "");
+                deadline = DateTime.Now.AddSeconds(12);
+                while (DateTime.Now < deadline && !ngQueue.Snapshot().Any(x => x.ImageName == expectedFace)) Thread.Sleep(100);
+                if (!ngQueue.Snapshot().Any(x => x.ImageName == expectedFace && x.ProductDmc == face001))
+                {
+                    Console.WriteLine("FAIL: dual-face folder not enqueued to pending-NG");
+                    fail++;
+                }
+                else Console.WriteLine("PASS: dual-face product folder enqueued to pending-NG");
+
+                var xmlFace = Path.Combine(reports, "dualface.xml");
+                File.WriteAllText(xmlFace,
+                    $"<?xml version=\"1.0\"?><root><event><partReceived identifier=\"{face000}\" /></event></root>");
+                deadline = DateTime.Now.AddSeconds(8);
+                while (DateTime.Now < deadline && ngQueue.Snapshot().Any(x => x.ImageName == expectedFace)) Thread.Sleep(100);
+                if (ngQueue.Snapshot().Any(x => x.ImageName == expectedFace) || !cache.Contains(expectedFace))
+                {
+                    Console.WriteLine(
+                        $"FAIL: identifier 000 should match folder 001; ngHas={ngQueue.Snapshot().Any(x => x.ImageName == expectedFace)} judgingHas={cache.Contains(expectedFace)}");
+                    fail++;
+                }
+                else Console.WriteLine("PASS: dual-face 000/001 XML matched product folder");
+                cache.ForceRemove(expectedFace, "selftest dual-face cleanup");
+            }
+
             // 1b) 单张文件夹：只 1 张图也必须拷贝+入队（回归：单张不行）
             cache.ForceRemove(expected1, "selftest single prep");
             cache.ForceRemove(expected2, "selftest single prep");
@@ -465,5 +506,38 @@ internal static class SelfTest
 
         Console.WriteLine(fail == 0 ? "SELF_TEST: PASS" : $"SELF_TEST: FAIL count={fail}");
         return fail == 0 ? 0 : 1;
+    }
+
+    /// <summary>纯逻辑：正反面 000/001 + 站位后缀，不启监视器。</summary>
+    private static int RunMatchUnitTests()
+    {
+        var fail = 0;
+        void Expect(bool cond, string name)
+        {
+            if (cond) Console.WriteLine("PASS: " + name);
+            else
+            {
+                Console.WriteLine("FAIL: " + name);
+                fail++;
+            }
+        }
+
+        var face001 = "69165000510660012607298629502112";
+        var face000 = "69165000510660002607298629502112";
+        var other = "69165000510660012607298629502199"; // 尾部不同，不应互认
+
+        Expect(NgPendingQueue.ProductDmcMatchesIdentifier(face001, face000), "unit 001 folder vs 000 identifier");
+        Expect(NgPendingQueue.ProductDmcMatchesIdentifier(face000, face001), "unit 000 folder vs 001 identifier");
+        Expect(NgPendingQueue.ProductDmcMatchesIdentifier(face001, face001), "unit exact match");
+        Expect(!NgPendingQueue.ProductDmcMatchesIdentifier(face001, other), "unit reject different tail");
+        Expect(NgPendingQueue.ProductDmcMatchesIdentifier(face001 + "_S1", face000), "unit 001_S1 folder vs 000 identifier");
+        Expect(NgPendingQueue.ProductDmcMatchesIdentifier(face000 + "_S1", face001), "unit 000_S1 folder vs 001 identifier");
+        Expect(NgPendingQueue.AreDualFaceEquivalent(face001, face000), "unit AreDualFaceEquivalent");
+        Expect(!NgPendingQueue.AreDualFaceEquivalent(face001, other), "unit AreDualFace not other");
+        // 固定位不是 000/001 时不互认（例如第14～16位是 002）
+        var face002 = face001.Substring(0, 13) + "002" + face001.Substring(16);
+        Expect(!NgPendingQueue.AreDualFaceEquivalent(face001, face002), "unit reject 001 vs 002 marker");
+
+        return fail;
     }
 }
